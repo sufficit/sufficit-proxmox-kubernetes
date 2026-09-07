@@ -27,7 +27,7 @@ e os widgets mostrem os valores reais — o mesmo estado da primeira abertura.
 Na estação com Node 18+ (Chromium do Playwright é baixado no `npm install`):
 
 ```bash
-cd pve-k8s-ui/tests
+cd sufficit-proxmox-kubernetes/tests
 npm install
 PVE_URL=https://pve.example.com:8006/ \
 PVE_USER='k8s-test@pve' \
