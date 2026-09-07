@@ -1,0 +1,6 @@
+{
+  "name": "pve-k8s-ui-tests",
+  "private": true,
+  "scripts": { "test": "playwright test -c playwright.config.js" },
+  "devDependencies": { "@playwright/test": "1.61.1" }
+}

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kubernetes (K3s)</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #2b2b2b; --muted: #777; --card: #f4f5f6;
+    --line: #d9dcde; --ok: #21a666; --bad: #d34e4e; --warn: #d99b26; --accent: #135a9f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1f24; --fg: #d7dbde; --muted: #8b9299; --card: #23282e;
+      --line: #38404a; --ok: #3ecf8e; --bad: #ff6b6b; --warn: #f0b429; --accent: #6cb2f5;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px 20px; background: var(--bg); color: var(--fg);
+         font: 13px/1.45 -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif; }
+  h1 { font-size: 17px; margin: 0 0 2px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+       color: var(--muted); margin: 0 0 8px; }
+  .sub { color: var(--muted); margin-bottom: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+          padding: 12px 14px; margin-bottom: 12px; }
+  .badge { display: inline-block; padding: 1px 9px; border-radius: 10px; font-weight: 600; }
+  .ok   { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+  .bad  { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad); }
+  .warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 4px 10px 4px 0; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  code { background: color-mix(in srgb, var(--fg) 8%, transparent); padding: 0 5px;
+         border-radius: 4px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 4px 18px; }
+  .k { color: var(--muted); }
+  .err { color: var(--bad); }
+  footer { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+  <h1>Kubernetes (K3s) <span id="ver"></span></h1>
+  <div class="sub">nó PVE: <strong id="pvenode">…</strong> · atualizado: <span id="gen">—</span></div>
+
+  <div class="card">
+    <h2>Serviço systemd (k3s)</h2>
+    <div id="svc" class="grid"><span class="k">carregando…</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Nó do cluster</h2>
+    <div id="knode" class="grid"><span class="k">carregando…</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Rede do Kubernetes</h2>
+    <div id="knet" class="grid"><span class="k">carregando…</span></div>
+    <div id="knet-conflicts" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Pods — kube-system</h2>
+    <table>
+      <thead><tr><th>POD</th><th>READY</th><th>STATUS</th><th>RESTARTS</th><th>IDADE</th></tr></thead>
+      <tbody id="pods"><tr><td colspan="5" class="k">carregando…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Namespaces</h2>
+    <div id="ns" class="grid"><span class="k">carregando…</span></div>
+  </div>
+
+  <footer>POC somente leitura · gerencie o serviço na aba System → Services · status.json regenerado por cron a cada minuto</footer>
+
+<script>
+const api = (p) => fetch(p, { headers: { accept: 'application/json' } })
+  .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+
+const badge = (txt, cls) => `<span class="badge ${cls}">${txt}</span>`;
+
+async function loadPve() {
+  const nodes = (await api('/api2/json/nodes')).data;
+  const node = nodes[0].node;
+  document.getElementById('pvenode').textContent = node;
+  const svcs = (await api(`/api2/json/nodes/${node}/services`)).data;
+  const k3s = svcs.find(s => s.service === 'k3s');
+  const el = document.getElementById('svc');
+  if (!k3s) { el.innerHTML = '<span class="err">serviço k3s não listado pela API</span>'; return; }
+  const active = k3s['active-state'], unit = k3s['unit-state'];
+  const cls = active === 'active' ? 'ok' : (active === 'failed' ? 'bad' : 'warn');
+  el.innerHTML =
+    `<div><span class="k">estado</span> ${badge(active, cls)}</div>` +
+    `<div><span class="k">unit</span> ${unit}</div>` +
+    `<div><span class="k">descrição</span> ${k3s.desc || ''}</div>`;
+}
+
+function kv(k, v) { return `<div><span class="k">${k}</span> ${v ?? '—'}</div>`; }
+
+async function loadNetwork() {
+  const box = document.getElementById('knet');
+  const conflicts = document.getElementById('knet-conflicts');
+  try {
+    const net = (await api('/api2/json/cluster/k8snet/network')).data || {};
+    const e = net.effective || {};
+    const vnets = (net.sdn || {}).vnets || [];
+    box.innerHTML =
+      kv('pod CIDR', `<code>${e.podcidr || '—'}</code>`) +
+      kv('service CIDR', `<code>${e.servicecidr || '—'}</code>`) +
+      kv('backend', e.backend || '—') +
+      kv('flannel iface', `<code>${e['flannel-iface'] || '(auto)'}</code>`) +
+      kv('node IP', `<code>${e['node-ip'] || '(auto)'}</code>`) +
+      kv('SDN VNets', `<strong>${vnets.length}</strong>`);
+    const c = net.conflicts || [];
+    conflicts.innerHTML = c.length
+      ? `<span class="badge warn">${c.length} conflito(s) de faixa</span> ` + c.map(x =>
+          `<code>${x.cidr}</code> ↔ ${x.detail}`).join('<br>')
+      : `<span class="badge ok">sem conflitos de faixa</span>`;
+  } catch (e) {
+    box.innerHTML = `<span class="err">API de rede indisponível (${e.message})</span>`;
+    conflicts.textContent = '';
+  }
+}
+
+async function loadStatus() {
+  const st = await api('/pve2/js/k8s/status.json?_=' + Date.now());
+  document.getElementById('gen').textContent = st.generated || '—';
+  document.getElementById('ver').textContent = st.version ? '· ' + st.version : '';
+
+  const n = st.node;
+  const kn = document.getElementById('knode');
+  if (n) {
+    kn.innerHTML =
+      kv('estado', badge(n.ready ? 'Ready' : 'NotReady', n.ready ? 'ok' : 'bad')) +
+      kv('ip', `<code>${n.internalIP || '—'}</code>`) +
+      kv('papel', (n.roles || []).join(', ') || '—') +
+      kv('kubelet', n.kubelet || '—') +
+      kv('runtime', n.runtime || '—') +
+      kv('SO', n.os || '—') +
+      kv('kernel', n.kernel || '—') +
+      kv('capacidade', `${n.cpu || '?'} vCPU · ${n.memoryGiB || '?'} GiB`);
+  } else {
+    kn.innerHTML = '<span class="err">sem dados do nó</span>';
+  }
+
+  const tb = document.getElementById('pods');
+  const pods = st.systemPods || [];
+  tb.innerHTML = pods.length
+    ? pods.map(p => {
+        const cls = p.status === 'Running' ? 'ok' : (p.status === 'Succeeded' ? '' : 'warn');
+        return `<tr><td><code>${p.name}</code></td><td>${p.ready}</td>` +
+               `<td><span class="badge ${cls}">${p.status}</span></td>` +
+               `<td>${p.restarts}</td><td>${p.age}</td></tr>`;
+      }).join('')
+    : '<tr><td colspan="5" class="err">sem pods</td></tr>';
+
+  const ns = document.getElementById('ns');
+  const entries = Object.entries(st.namespaces || {});
+  ns.innerHTML = entries.length
+    ? entries.map(([k, v]) => kv(k, `<strong>${v}</strong>`)).join('')
+    : '<span class="err">sem namespaces</span>';
+}
+
+async function main() {
+  try { await loadPve(); } catch (e) {
+    document.getElementById('svc').innerHTML =
+      '<span class="err">falha na API do PVE (' + e.message + ') — sessão expirada? recarregue a UI</span>';
+  }
+  try { await loadStatus(); } catch (e) {
+    document.getElementById('knode').innerHTML =
+      '<span class="err">status.json indisponível (' + e.message + ')</span>';
+  }
+  loadNetwork();
+}
+main();
+setInterval(main, 30000);
+</script>
+</body>
+</html>

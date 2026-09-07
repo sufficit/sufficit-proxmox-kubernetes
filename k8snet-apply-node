@@ -1,0 +1,79 @@
+#!/usr/bin/perl
+# POC k8s (k8s-poc): aplicador local das flags de rede do k3s.
+#
+# Instalado pelo patch_ui.py em /usr/local/sbin/k8snet-apply-node (TODOS os
+# nos do cluster PVE). E o mesmo codigo para todos os caminhos:
+#   - PUT /cluster/k8snet/network  -> fan-out chama este script via SSH nos
+#     nos remotos (--check antes de qualquer mudanca, --apply para aplicar,
+#     --rollback para restaurar o backup .bak-k8snet);
+#   - PUT /nodes/{node}/k8snet/network -> handler per-node executa este
+#     script localmente.
+# A implementacao real vive em PVE::API2::Cluster::K8sNet (mesma fonte usada
+# pelo no local), garantindo comportamento identico local e remoto.
+#
+# Uso:
+#   k8snet-apply-node --publish                       # cron (1 min): publica snapshot
+#   k8snet-apply-node [--check|--rollback] [--no-restart] \
+#       [--cluster-cidr=a.b.c.d/nn] [--service-cidr=a.b.c.d/nn] \
+#       [--flannel-iface=NAME] [--node-ip=a.b.c.d]
+#
+# --check    : apenas valida (unit presente + faixas sem sobreposicao); nao
+#              altera nada. Exit 0 = aplicavel.
+# --rollback : restaura a unit do backup .bak-k8snet, daemon-reload e restart.
+# --no-restart: reescreve a unit sem reiniciar o k3s (restart manual depois).
+
+use strict;
+use warnings;
+
+use PVE::API2::Cluster::K8sNet;
+
+my %flags;
+my ($check, $rollback, $restart, $publish) = (0, 0, 1, 0);
+
+for my $arg (@ARGV) {
+    if ($arg eq '--check') {
+        $check = 1;
+    } elsif ($arg eq '--rollback') {
+        $rollback = 1;
+    } elsif ($arg eq '--publish') {
+        $publish = 1;
+    } elsif ($arg eq '--no-restart') {
+        $restart = 0;
+    } elsif ($arg =~ m/^--(cluster-cidr|service-cidr)=(.+)$/) {
+        $flags{$1} = PVE::API2::Cluster::K8sNet::validate_cidr($2, $1);
+    } elsif ($arg =~ m/^--(flannel-iface)=(.+)$/) {
+        $flags{$1} = PVE::API2::Cluster::K8sNet::validate_iface($2, $1);
+    } elsif ($arg =~ m/^--(node-ip)=(.+)$/) {
+        $flags{$1} = PVE::API2::Cluster::K8sNet::validate_ip($2, $1);
+    } else {
+        die "unknown argument: $arg\n";
+    }
+}
+
+# Modo de somente leitura chamado pelo cron root de cada no (1 min): publica o
+# snapshot local no status KV do pmxcfs para o GET de cluster agregar todos os
+# nos. Nao altera unit nem servico.
+if ($publish) {
+    PVE::API2::Cluster::K8sNet::publish_node_snapshot(
+        PVE::API2::Cluster::K8sNet::node_snapshot());
+    exit 0;
+}
+
+if ($rollback) {
+    PVE::API2::Cluster::K8sNet::restore_unit_backup(
+        '/etc/systemd/system/k3s.service.failed-k8snet-fanout-' . time());
+    print "rollback done\n";
+    exit 0;
+}
+
+die "no network setting supplied\n" if !%flags;
+
+if ($check) {
+    PVE::API2::Cluster::K8sNet::check_node_net_flags(\%flags);
+    print "check OK\n";
+    exit 0;
+}
+
+PVE::API2::Cluster::K8sNet::apply_node_net_flags(\%flags, $restart);
+print "done\n";
+exit 0;
