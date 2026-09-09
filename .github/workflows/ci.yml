@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-proxmox-kubernetes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Validacao estatica (sintaxe e lockfile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Sintaxe Python: aplicador de patches e gerador de status.
+      - name: Python (py_compile)
+        run: python3 -m py_compile patch_ui.py gen-status.py
+
+      # Sintaxe JavaScript: painel do browser e suite Playwright.
+      - name: JavaScript (node --check)
+        run: |
+          for f in app-browser.js tests/playwright.config.js tests/*.spec.js; do
+            node --check "$f"
+          done
+
+      # Lint de shell: manage.sh, guard e helper de testes.
+      # (shellcheck ja vem pre-instalado no ubuntu-latest; instala so como rede
+      # de seguranca se a imagem mudar.)
+      - name: Shell (shellcheck)
+        run: |
+          if ! command -v shellcheck >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq shellcheck
+          fi
+          shellcheck -S warning manage.sh k8s-ui-guard tests/pve-test-user.sh
+
+      # npm ci falha se package.json e package-lock.json divergirem.
+      # Nao baixa browsers: a suite Playwright roda contra um host PVE real,
+      # fora do escopo deste CI.
+      - name: Testes npm (lockfile consistente)
+        working-directory: tests
+        run: npm ci --ignore-scripts
+
+      # Os modulos Perl dependem da arvore PVE::* (register_method roda em
+      # compile time), que so existe num host PVE. Stubamos os modulos usados
+      # em compile time para validar a sintaxe dos .pm sem instalar o Proxmox.
+      - name: Perl (sintaxe com stubs PVE)
+        run: |
+          STUB="$RUNNER_TEMP/pve-stubs"
+          mkdir -p "$STUB"
+          for mod in \
+            PVE::Cluster PVE::Exception PVE::INotify PVE::JSONSchema \
+            PVE::RESTHandler PVE::RPCEnvironment PVE::SSHInfo PVE::Tools \
+            PVE::API2Tools PVE::AccessControl PVE::SafeSyslog \
+            PVE::API2::Cluster::K8sNet JSON File::ReadBackwards; do
+            path="$STUB/${mod//:://}.pm"
+            mkdir -p "$(dirname "$path")"
+            printf 'package %s;\nuse strict;\nsub _k8spoc_stub {}\nsub import {\n  my ($c, @sym) = @_;\n  no strict "refs";\n  *{"${c}::$_"} = \\&_k8spoc_stub for @sym;\n}\n1;\n' "$mod" > "$path"
+          done
+          export PERL5LIB="$STUB"
+          perl -c k8snet.pm
+          perl -c k8sapp.pm
+          perl -c nodek8snet.pm
+          perl -c k8snet-apply-node

@@ -4,7 +4,9 @@ Integra o K3s que roda no host PVE à própria UI do Proxmox (validado no
 PVE 9.2.11, Debian 13). Consulta dos dados do
 cluster + **ações declarativas** (`kubectl scale/rollout/delete pod`) no menu
 de contexto — sem expor kubeconfig, tokens, shell do host ou edição livre de
-YAML.## O que o usuário vê
+YAML.
+
+## O que o usuário vê
 
 1. **Node → System (grade de serviços):** linha `k3s` —
    "Lightweight Kubernetes", estado, unit-state, Start habilitado.
