@@ -1,0 +1,9 @@
+// k8s-ui (k8s-poc): revalida os patches da UI do Proxmox apos upgrades.
+// Nao bloqueia nem falha a transacao do apt (|| true): se o guard nao
+// conseguir reparar, o upgrade do pve-manager conclui normalmente e o
+// detalhe fica em /var/log/k8s-ui-guard.log. O lock e do proprio guard
+// (flock -n interno) - um flock externo no mesmo arquivo faria o guard
+// recusar por "outra instancia ativa".
+DPkg::Post-Invoke {
+    "/usr/local/sbin/k8s-ui-guard || true";
+};

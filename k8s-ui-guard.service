@@ -1,0 +1,8 @@
+[Unit]
+Description=k8s-ui guard: revalida patches da UI do Proxmox (k8s-poc)
+After=pveproxy.service pvedaemon.service
+# oneshot de verificacao/reparo; nao depende de rede nem do k3s
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/k8s-ui-guard

@@ -1,0 +1,90 @@
+#!/bin/bash
+# k8s-ui-guard -- revalida (e repara) os patches da UI do Proxmox apos upgrades.
+#
+# O pacote pve-manager entrega os arquivos que esta integracao altera
+# (Services.pm, Cluster.pm, Nodes.pm, pvemanagerlib.js, index.html.tpl):
+# qualquer upgrade do pacote os sobrescreve com as versoes do vendor. O guard
+# detecta a perda pelos markers e reexecuta patch_ui.py (idempotente), que
+# reaplica os patches, reinstala os arquivos nossos e reinicia
+# pvedaemon/pveproxy quando necessario.
+#
+# Acionado por:
+#  - hook do apt (DPkg::Post-Invoke em /etc/apt/apt.conf.d/99k8s-ui-guard)
+#  - timer systemd k8s-ui-guard.timer (rede de seguranca; cobre dpkg direto)
+#  - manualmente: k8s-ui-guard [-v]
+#
+# O diretorio com patch_ui.py vem de /var/lib/pve-manager/k8s/guard-src-dir
+# (gravado pelo proprio patch_ui.py); K8SUI_DIR=... sobrepoe para testes.
+# Log: /var/log/k8s-ui-guard.log
+set -u
+
+LOG=/var/log/k8s-ui-guard.log
+LOCK=/run/lock/k8s-ui-guard.lock
+STATE_DIR=/var/lib/pve-manager/k8s
+VERBOSE=0
+[ "${1:-}" = "-v" ] && VERBOSE=1
+
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
+say() { [ $VERBOSE -eq 1 ] && printf '%s\n' "$*"; log "$*"; }
+
+if [ -z "${K8SUI_DIR:-}" ] && [ -r "$STATE_DIR/guard-src-dir" ]; then
+  K8SUI_DIR=$(head -n1 "$STATE_DIR/guard-src-dir")
+fi
+K8SUI_DIR=${K8SUI_DIR:-/root/k8s-ui}
+
+SERVICES_PM=/usr/share/perl5/PVE/API2/Services.pm
+CLUSTER_PM=/usr/share/perl5/PVE/API2/Cluster.pm
+NODES_PM=/usr/share/perl5/PVE/API2/Nodes.pm
+JS=/usr/share/pve-manager/js/pvemanagerlib.js
+TPL=/usr/share/pve-manager/index.html.tpl
+K8S_DIR=/usr/share/pve-manager/js/k8s
+K8SAPP_PM=/usr/share/perl5/PVE/API2/K8sApp.pm
+
+# integridade pelos markers dos patches (mesmos do manage.sh verify)
+intact() {
+  grep -q "^    'k3s',$" "$SERVICES_PM" 2>/dev/null || return 1
+  grep -q 'POC k8s (k8s-poc)' "$CLUSTER_PM" 2>/dev/null || return 1
+  grep -q 'PVE::API2::NodeK8sNet' "$NODES_PM" 2>/dev/null || return 1
+  grep -q "itemId: 'kubernetes'," "$JS" 2>/dev/null || return 1
+  grep -q 'k8s/app-browser.js' "$TPL" 2>/dev/null || return 1
+  [ -s "$K8S_DIR/app-browser.js" ] || return 1
+  [ -f "$K8SAPP_PM" ] || return 1
+  return 0
+}
+
+exec 9>"$LOCK"
+flock -n 9 || { say "outra instancia ativa; saindo"; exit 0; }
+
+if intact; then
+  say "integridade OK (nenhuma acao)"
+  exit 0
+fi
+
+say "patches ausentes/sobrescritos -> reexecutando patch_ui.py"
+if [ ! -f "$K8SUI_DIR/patch_ui.py" ]; then
+  say "ERRO: $K8SUI_DIR/patch_ui.py nao encontrado; nada reparado"
+  exit 1
+fi
+out=$(timeout 300 python3 "$K8SUI_DIR/patch_ui.py" 2>&1)
+rc=$?
+printf '%s\n' "$out" >> "$LOG"
+if [ $rc -ne 0 ]; then
+  say "ERRO: patch_ui.py falhou (rc=$rc); anchors podem ter mudado no upgrade"
+  exit $rc
+fi
+
+# health-check com uma retry: logo apos um upgrade o apt reinicia pveproxy/
+# pvedaemon e o verify pode falhar por servico ainda assentando, nao por erro
+# real de reparo.
+sleep 3
+for attempt in 1 2; do
+  vout=$(cd "$K8SUI_DIR" && timeout 300 bash manage.sh verify 2>&1)
+  printf '%s\n' "$vout" >> "$LOG"
+  if printf '%s' "$vout" | grep -q 'RESULTADO: TUDO OK'; then
+    say "reparo concluido: TUDO OK"
+    exit 0
+  fi
+  [ $attempt -eq 1 ] && { say "verify nao passou (tentativa 1); nova tentativa em 10s"; sleep 10; }
+done
+say "ERRO: verify nao passou apos reparo (detalhes no log)"
+exit 1

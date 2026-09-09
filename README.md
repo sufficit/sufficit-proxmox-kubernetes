@@ -100,19 +100,32 @@ bash /root/k8s-ui/manage.sh uninstall   # restaura originais, remove painel/cron
 
 ## Reaplicar depois de upgrade do PVE
 
-O `pve-manager` pode substituir `Services.pm` e `pvemanagerlib.js` durante
-um upgrade. Para reaplicar a integração, copie/instale novamente o pacote e
-execute `patch_ui.py` como root. O script é idempotente e agora também
-compara o horário do processo `pvedaemon` com o arquivo `Services.pm`:
-se o daemon tiver sido iniciado antes do patch, reinicia apenas o
-`pvedaemon` para recarregar a lista de serviços. Isso não reinicia o host,
-nem interrompe VMs ou containers em execução. Depois, reinicie o `pveproxy`
-se houver arquivos novos no diretório estático.
+O `pve-manager` entrega `Services.pm`, `Cluster.pm`, `Nodes.pm`,
+`pvemanagerlib.js` e `index.html.tpl` — um upgrade os sobrescreve. Desde o
+guard isso é **automático**:
+
+- `patch_ui.py` instala `/usr/local/sbin/k8s-ui-guard` + timer systemd
+  (`k8s-ui-guard.timer`, a cada 30 min + 10 min após boot) + hook apt
+  (`/etc/apt/apt.conf.d/99k8s-ui-guard`, `DPkg::Post-Invoke`).
+- O guard confere os markers de integridade; se algum patch sumiu, reexecuta
+  `python3 $K8SUI_DIR/patch_ui.py` (idempotente — reaplica patches, reinstala
+  os arquivos nossos e reinicia `pvedaemon`/`pveproxy` se necessário) e roda
+  `manage.sh verify` como health-check (uma retry de 10 s).
+- O hook do apt nunca bloqueia nem falha a transação (`|| true`); qualquer
+  falha fica em `/var/log/k8s-ui-guard.log` e a UI volta ao estado nativo.
+- A pasta do deploy fica em `/var/lib/pve-manager/k8s/guard-src-dir`
+  (gravada a cada execução do `patch_ui.py`); `K8SUI_DIR=... k8s-ui-guard`
+  sobrepõe para testes.
+
+Manual: `k8s-ui-guard -v` (mostra saída; sempre loga).
 
 ## Limitações e cuidados
 
-- **Upgrade do `pve-manager`** sobrescreve `Services.pm` e
-  `pvemanagerlib.js`: re-executar `patch_ui.py` e reiniciar o pveproxy.
+- **Upgrade do `pve-manager`** sobrescreve `Services.pm`, `Cluster.pm`,
+  `Nodes.pm`, `pvemanagerlib.js` e `index.html.tpl`: o guard reaplica
+  automaticamente (hook apt + timer 30 min; detalhes acima). Se o guard
+  falhar (anchors mudaram no PVE novo), a UI volta ao estado nativo e o
+  reparo manual é `python3 $K8SUI_DIR/patch_ui.py`.
   Os backups `.bak-k8spoc` são da versão 9.2.11 — não restaurar em outra.
 - **Cache:** `patch_ui.py` acrescenta `k8spoc=<hash-do-código>` aos dois
   scripts da UI. Assim, após reaplicar, o navegador baixa automaticamente o

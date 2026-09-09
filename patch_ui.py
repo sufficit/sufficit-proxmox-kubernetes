@@ -687,6 +687,58 @@ if _new_tpl != _tpl:
 else:
     print(f"[skip] index.html.tpl: cache-busting ja em k8spoc={CACHE_TOKEN}")
 
+# ---------- 5b) guard: revalidar/reparar patches apos upgrade do pve-manager ----------
+# O pve-manager ENTREGA os arquivos patcheados (Services.pm, Cluster.pm,
+# Nodes.pm, pvemanagerlib.js, index.html.tpl): um upgrade os sobrescreve.
+# O guard (timer systemd 30 min + hook apt DPkg::Post-Invoke) detecta a perda
+# pelos markers e reexecuta ESTE script (idempotente). O guard descobre este
+# diretorio pelo ponteiro abaixo - se o deploy mudar de pasta, rodar este
+# script da nova localizacao atualiza o ponteiro.
+K8S_STATE_DIR = "/var/lib/pve-manager/k8s"
+GUARD_BIN = "/usr/local/sbin/k8s-ui-guard"
+GUARD_APTCONF = "/etc/apt/apt.conf.d/99k8s-ui-guard"
+GUARD_SERVICE = "/etc/systemd/system/k8s-ui-guard.service"
+GUARD_TIMER = "/etc/systemd/system/k8s-ui-guard.timer"
+
+os.makedirs(K8S_STATE_DIR, exist_ok=True)
+with open(os.path.join(K8S_STATE_DIR, "guard-src-dir"), "w", encoding="utf-8") as f:
+    f.write(_HERE + "\n")
+print(f"[ok] guard: origem registrada ({K8S_STATE_DIR}/guard-src-dir -> {_HERE})")
+
+
+def _install_ours(src_name, dst, mode):
+    src = os.path.join(_HERE, src_name)
+    if not os.path.exists(src):
+        print(f"[aviso] {src_name} nao encontrado ao lado do patch_ui.py")
+        return False
+    with open(src, encoding="utf-8") as f:
+        data = f.read()
+    cur = open(dst, encoding="utf-8").read() if os.path.exists(dst) else None
+    if cur != data:
+        with open(dst, "w", encoding="utf-8") as f:
+            f.write(data)
+        os.chmod(dst, mode)
+        print(f"[ok] {src_name} instalado ({dst})")
+    else:
+        print(f"[skip] {src_name} ja atualizado")
+    return True
+
+
+_guard_ok = _install_ours("k8s-ui-guard", GUARD_BIN, 0o755)
+_install_ours("k8s-ui-guard.aptconf", GUARD_APTCONF, 0o644)
+_install_ours("k8s-ui-guard.service", GUARD_SERVICE, 0o644)
+_install_ours("k8s-ui-guard.timer", GUARD_TIMER, 0o644)
+if _guard_ok:
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True, text=True)
+    r = subprocess.run(
+        ["systemctl", "enable", "--now", "k8s-ui-guard.timer"],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        print("[ok] guard: timer habilitado (revalidacao a cada 30 min)")
+    else:
+        print(f"[erro] guard: systemctl enable falhou: {r.stderr.strip()}")
+
 # ---------- 6) recarregar modulos Perl nos daemons ----------
 # O pvedaemon carrega Services.pm/Cluster.pm UMA unica vez (modulo Perl em
 # memoria + cache estatico), e o /cluster/resources (user=>'all') executa nos

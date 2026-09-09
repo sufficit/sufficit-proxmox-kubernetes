@@ -1,0 +1,11 @@
+[Unit]
+Description=k8s-ui guard: revalidacao periodica dos patches da UI (k8s-poc)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

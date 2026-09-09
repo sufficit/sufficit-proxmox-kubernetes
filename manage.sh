@@ -36,6 +36,10 @@ verify() {
   grep -q "PVE::API2::Cluster::K8sNet" "$CLUSTER_PM" && ok "Cluster.pm registra /cluster/k8snet" || fail "Cluster.pm sem rota k8snet"
   [ -x "$K8SNET_APPLY" ] && ok "aplicador instalado ($K8SNET_APPLY)" || fail "aplicador ausente ($K8SNET_APPLY)"
   crontab -l 2>/dev/null | grep -q "k8snet-apply-node --publish" && ok "cron publisher do snapshot ativo (1 min)" || fail "cron publisher ausente"
+  [ -x /usr/local/sbin/k8s-ui-guard ] && ok "guard instalado (/usr/local/sbin/k8s-ui-guard)" || fail "guard ausente (/usr/local/sbin/k8s-ui-guard)"
+  [ -f /etc/apt/apt.conf.d/99k8s-ui-guard ] && ok "guard: hook apt (DPkg::Post-Invoke)" || fail "guard: hook apt ausente"
+  [ -f "$K8S_STATE_DIR/guard-src-dir" ] && ok "guard: origem do patch_ui.py registrada" || fail "guard: origem do patch_ui.py nao registrada (rode patch_ui.py)"
+  systemctl is-enabled --quiet k8s-ui-guard.timer && ok "guard: timer habilitado (30 min)" || fail "guard: timer nao habilitado"
   grep -q "pveK8sNetworkPanel" "$K8S_DIR/app-browser.js" 2>/dev/null && grep -q "Cluster nodes" "$K8S_DIR/app-browser.js" && ok "painel com grade multi-no" || fail "app-browser.js sem grade multi-no"
   grep -q "itemId: 'kubernetesnetwork'," "$JS" && ok "submenu Datacenter Kubernetes/Network" || fail "submenu Kubernetes/Network ausente"
   grep -q "k8sapp: 'pveK8sAppBrowser'," "$JS" && ok "k8sapp abre painel pveK8sAppBrowser" || fail "treeTypeToClass sem k8sapp"
@@ -166,6 +170,14 @@ uninstall() {
     rm -f "$K8S_DIR/index.html" "$K8S_DIR/status.json" "$K8S_DIR/apps.json" "$K8S_DIR/app-browser.js" "$K8S_DIR/history.json"
     rmdir "$K8S_DIR" 2>/dev/null && echo "  removido: $K8S_DIR"
   fi
+  # guard precisa sair ANTES de qualquer restauracao: se ficar ativo ele
+  # detecta os markers sumindo e reexecuta o patch_ui.py (ressuscitaria a
+  # integracao logo apos o uninstall).
+  systemctl disable --now k8s-ui-guard.timer >/dev/null 2>&1
+  rm -f /etc/systemd/system/k8s-ui-guard.timer /etc/systemd/system/k8s-ui-guard.service
+  rm -f /etc/apt/apt.conf.d/99k8s-ui-guard /usr/local/sbin/k8s-ui-guard
+  systemctl daemon-reload >/dev/null 2>&1
+  echo "  removido: guard (binario, hook apt, units do systemd)"
   # notas sao dados do usuario: o padrao do PVE e preservar /var/lib em
   # desinstalacoes, mas como a integracao e um POC removemos o diretorio nosso.
   rm -rf "$K8S_STATE_DIR" && echo "  removido: $K8S_STATE_DIR (notas)"
