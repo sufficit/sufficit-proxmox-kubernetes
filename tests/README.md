@@ -99,12 +99,18 @@ GitHub Actions e sobem os traces como artefatos (7 dias).
 Configuracao (uma vez, admin do repo):
 
 ```bash
-# hosts da matrix (hostnames publicos ficam FORA do codigo publico):
+# hosts da matrix (URLs e nomes de no ficam em SECRETS: sao mascarados
+# automaticamente nos logs, e o repositorio e publico):
 gh variable set E2E_HOSTS_JSON \
-  --body '[{"name":"eveo","url":"https://<host-eveo>:8006/","node":"<no-pve>"}]'
-gh secret set PVE_E2E_USER   --body 'k8s-e2e@pve'
+  --body '[{"name":"eveo","slot":"EVEO"},{"name":"apoint","slot":"APOINT"}]'
+gh secret set PVE_URL_EVEO    --body 'https://<host-eveo>:8006/'
+gh secret set PVE_HOST_EVEO   --body '<no-pve-do-eveo>'
+gh secret set PVE_E2E_USER    --body 'k8s-e2e@pve'
 gh secret set PVE_E2E_PASSWORD --body '<senha do k8s-e2e>'
 ```
+
+Cada entrada da matrix resolve seus secrets pelo `slot`:
+`PVE_URL_<slot>` e `PVE_HOST_<slot>`.
 
 O usuario `k8s-e2e@pve` e **persistente** (a suite noturna roda sem
 ninguem para cria-lo) e usa o mesmo papel restrito do

@@ -124,6 +124,7 @@ for attempt in 1 2; do
   vout=$(cd "$K8SUI_DIR" && timeout 300 bash manage.sh verify 2>&1)
   printf '%s\n' "$vout" >> "$LOG"
   if printf '%s' "$vout" | grep -q 'RESULTADO: TUDO OK'; then
+    recovered
     say "reparo concluido: TUDO OK"
     exit 0
   fi

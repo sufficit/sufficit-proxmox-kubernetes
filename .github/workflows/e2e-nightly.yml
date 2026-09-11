@@ -24,8 +24,11 @@ jobs:
       matrix:
         host: ${{ fromJSON(vars.E2E_HOSTS_JSON) }}
     env:
-      PVE_URL: ${{ matrix.host.url }}
-      PVE_HOST: ${{ matrix.host.node }}
+      # URL e nó PVE vêm de secrets (PVE_URL_<slot>, PVE_HOST_<slot>):
+      # o repositório é público e os logs de Actions também -- valores de
+      # secrets são mascarados automaticamente pelo GitHub.
+      PVE_URL: ${{ secrets[format('PVE_URL_{0}', matrix.host.slot)] }}
+      PVE_HOST: ${{ secrets[format('PVE_HOST_{0}', matrix.host.slot)] }}
       PVE_USER: ${{ secrets.PVE_E2E_USER }}
       PVE_PASSWORD: ${{ secrets.PVE_E2E_PASSWORD }}
     steps:
@@ -40,8 +43,8 @@ jobs:
 
       - name: Validar secrets
         run: |
-          if [ -z "$PVE_USER" ] || [ -z "$PVE_PASSWORD" ]; then
-            echo "::error::Configure os secrets PVE_E2E_USER e PVE_E2E_PASSWORD do repositorio."
+          if [ -z "$PVE_USER" ] || [ -z "$PVE_PASSWORD" ] || [ -z "$PVE_URL" ] || [ -z "$PVE_HOST" ]; then
+            echo "::error::Faltam secrets (PVE_E2E_USER, PVE_E2E_PASSWORD, PVE_URL_<slot>, PVE_HOST_<slot>)."
             exit 1
           fi
 
