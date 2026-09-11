@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-POC: integra o K3s na UI do Proxmox VE (no host alvo).
+POC: integra o K3s na UI do Proxmox VE (no host pve02).
 
 1. Services.pm: adiciona 'k3s' a lista de servicos da aba System.
 2. Cluster.pm: injeta aplicacoes Kubernetes (tipo 'k8sapp') em /cluster/resources,
@@ -13,6 +13,7 @@ POC: integra o K3s na UI do Proxmox VE (no host alvo).
      mapeamento p/ o painel de detalhe (treeTypeToClass -> pveK8sAppBrowser)
      e campo 'k8sapp' no ResourceStore.
 4. index.html.tpl: carrega /pve2/js/k8s/app-browser.js (widget do painel de app).
+4b. pods (k8spod) aninhados sob o host real na Server View + painel/menu de pod.
 
 Idempotente: rodar de novo nao duplica (detecta por marker).
 Backups: *.bak-k8spoc (criados apenas na primeira execucao).
@@ -28,6 +29,73 @@ import re
 import shutil
 import subprocess
 import sys
+
+# --dry-run: valida todas as ancoras/compatibilidade SEM alterar nada
+# (pre-checagem em versoes de PVE ainda nao testadas). Escritas vao para um
+# overlay em memoria (leiturais subsequentes veem o conteudo "escrito");
+# subprocess/os.makedirs/os.chmod/shutil viram no-ops.
+DRY_RUN = "--dry-run" in sys.argv
+if DRY_RUN:
+    import io as _io
+    import types as _types
+
+    class _Res:
+        stdout = ""
+        stderr = ""
+        returncode = 0
+
+    _overlay = {}
+
+    class _DryWriter:
+        def __init__(self, path):
+            self._p = path
+            self._buf = []
+
+        def write(self, s):
+            self._buf.append(s)
+            return len(s)
+
+        def writelines(self, xs):
+            for x in xs:
+                self.write(x)
+
+        def flush(self):
+            pass
+
+        def close(self):
+            if self._buf and isinstance(self._buf[0], (bytes, bytearray)):
+                _overlay[self._p] = b"".join(self._buf)
+            else:
+                _overlay[self._p] = "".join(self._buf)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.close()
+            return False
+
+    _open = open
+
+    def open(file, mode="r", *a, **k):  # noqa: A001
+        if any(c in mode for c in "wax"):
+            return _DryWriter(file)
+        if "b" not in mode and file in _overlay:
+            return _io.StringIO(_overlay[file])
+        return _open(file, mode, *a, **k)
+
+    subprocess = _types.SimpleNamespace(run=lambda *a, **k: _Res())
+    shutil = _types.SimpleNamespace(
+        copy2=lambda *a, **k: None,
+        copy=lambda *a, **k: None,
+        copyfile=lambda *a, **k: None,
+    )
+    os.makedirs = lambda *a, **k: None
+    os.chmod = lambda *a, **k: None
+    # freshness-check: arquivos "instalados" no overlay nao existem em disco;
+    # devolve ts futuro para simular "daemon mais antigo que os .pm" sem falhar.
+    _getmtime = os.path.getmtime
+    os.path.getmtime = lambda p: _getmtime(p) if os.path.exists(p) else 2**31
 
 SERVICES = "/usr/share/perl5/PVE/API2/Services.pm"
 CLUSTER = "/usr/share/perl5/PVE/API2/Cluster.pm"
@@ -53,19 +121,33 @@ def backup(path):
 
 
 def patch(path, anchor, replacement, tag, marker=None):
-    marker = replacement.strip() if marker is None else marker
+    # anchor/replacement podem ser tuplas/listas alinhadas: variantes por
+    # versao do PVE (ex.: menu SDN do 9.1.x nao tem "Prefix Lists"). Usa a
+    # primeira variante que casar exatamente 1x; se nenhuma casar, aborta.
+    variants = (
+        list(zip(anchor, replacement))
+        if isinstance(anchor, (tuple, list))
+        else [(anchor, replacement)]
+    )
     with open(path, encoding="utf-8") as f:
         data = f.read()
+    if marker is None:
+        marker = variants[0][1].strip()
     if marker in data:
         print(f"[skip] {tag}: patch ja aplicado")
         return
-    n = data.count(anchor)
-    if n != 1:
-        print(f"[erro] {tag}: ancora encontrada {n}x (esperado 1). Abortando sem alterar.")
-        sys.exit(1)
-    data = data.replace(anchor, replacement, 1)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(data)
+    for i, (a, r) in enumerate(variants):
+        n = data.count(a)
+        if n == 1:
+            data = data.replace(a, r, 1)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(data)
+            suff = "" if len(variants) == 1 else f" (variante {i + 1}/{len(variants)})"
+            print(f"[ok] {tag}: patch aplicado{suff}")
+            return
+        print(f"[info] {tag}: variante {i + 1} casou {n}x (esperado 1); tentando proxima")
+    print(f"[erro] {tag}: nenhuma variante de ancora casou exatamente 1x. Abortando sem alterar.")
+    sys.exit(1)
     print(f"[ok] {tag}: patch aplicado")
 
 
@@ -86,12 +168,16 @@ patch(
     "                enum => ['vm', 'storage', 'node', 'sdn'],",
     "                enum => ['vm', 'storage', 'node', 'sdn', 'k8sapp'],",
     "Cluster.pm: enum do filtro type",
+    # marker SEM o fechamento do enum: casa tanto com a variante so-k8sapp
+    # quanto com k8sapp+k8spod (gravada pela secao 5a em runs anteriores).
+    marker="'sdn', 'k8sapp'",
 )
 patch(
     CLUSTER,
     "                        ['node', 'storage', 'pool', 'qemu', 'lxc', 'openvz', 'sdn', 'network'],",
     "                        ['node', 'storage', 'pool', 'qemu', 'lxc', 'openvz', 'sdn', 'network', 'k8sapp'],",
     "Cluster.pm: enum do retorno",
+    marker="'network', 'k8sapp'",
 )
 patch(
     CLUSTER,
@@ -102,7 +188,12 @@ patch(
     marker="The Kubernetes application identity (for type 'k8sapp').",
 )
 
-k8s_block = """        # POC k8s (k8s-poc): aplicações Kubernetes como recursos da árvore
+K8S_BLOCK_V2 = """        # POC k8s (k8s-poc): aplicações Kubernetes como recursos da árvore
+        # Agrupamento: os apps sobem com node='Kubernetes' — na Server View a
+        # árvore materializa o pseudo-host "Kubernetes" no nível do datacenter
+        # (um único lugar para o cluster inteiro, independente de onde o pod
+        # roda). O nó PVE real que serve a API (/nodes/{node}/k8sapp, kubectl
+        # local) viaja no campo k8snode.
         if (!$param->{type} || $param->{type} eq 'k8sapp') {
             my $appsfile = '/usr/share/pve-manager/js/k8s/apps.json';
             if (-f $appsfile) {
@@ -112,13 +203,15 @@ k8s_block = """        # POC k8s (k8s-poc): aplicações Kubernetes como recurso
                     my $raw = <$fh>;
                     close($fh);
                     my $apps = decode_json($raw)->{apps} || [];
+                    my $localnode = PVE::INotify::nodename();
                     for my $app (@$apps) {
-                        next if !$rpcenv->check($authuser, "/nodes/$app->{node}", ['Sys.Audit'], 1);
+                        next if !$rpcenv->check($authuser, "/nodes/$localnode", ['Sys.Audit'], 1);
                         push @$res, {
                             id => "k8sapp/$app->{namespace}/$app->{name}",
                             type => 'k8sapp',
                             k8sapp => "$app->{namespace}/$app->{name}",
-                            node => $app->{node},
+                            node => 'Kubernetes',
+                            k8snode => ($app->{node} // $localnode),
                             name => $app->{name},
                             text => "$app->{name} [$app->{namespace}]",
                             # 'running'/'stopped' recebem o tratamento CSS padrao; 'degraded' fica neutro
@@ -126,6 +219,78 @@ k8s_block = """        # POC k8s (k8s-poc): aplicações Kubernetes como recurso
                                 : (($app->{status} // '') eq 'stopped' ? 'stopped' : 'degraded'),
                             hastate => 'unmanaged',
                         };
+                    }
+                };    # falha silenciosa: sem apps.json a árvore segue normal
+            }
+        }
+
+"""
+k8s_block = """        # POC k8s (k8s-poc): aplicações Kubernetes como recursos da árvore
+        # Agrupamento: os apps sobem com node='Kubernetes' — na Server View a
+        # árvore materializa o pseudo-host "Kubernetes" no nível do datacenter
+        # (um único lugar para o cluster inteiro, independente de onde o pod
+        # roda). O nó PVE real que serve a API (/nodes/{node}/k8sapp, kubectl
+        # local) viaja no campo k8snode.
+        if (!$param->{type} || $param->{type} eq 'k8sapp') {
+            my $appsfile = '/usr/share/pve-manager/js/k8s/apps.json';
+            if (-f $appsfile) {
+                eval {
+                    open(my $fh, '<', $appsfile) or die "open: $!";
+                    local $/;
+                    my $raw = <$fh>;
+                    close($fh);
+                    my $apps = decode_json($raw)->{apps} || [];
+                    my $localnode = PVE::INotify::nodename();
+                    for my $app (@$apps) {
+                        next if !$rpcenv->check($authuser, "/nodes/$localnode", ['Sys.Audit'], 1);
+                        push @$res, {
+                            id => "k8sapp/$app->{namespace}/$app->{name}",
+                            type => 'k8sapp',
+                            k8sapp => "$app->{namespace}/$app->{name}",
+                            node => 'Kubernetes',
+                            k8snode => ($app->{node} // $localnode),
+                            name => $app->{name},
+                            text => "$app->{name} [$app->{namespace}]",
+                            # 'running'/'stopped' recebem o tratamento CSS padrao; 'degraded' fica neutro
+                            status => ($app->{status} // '') eq 'ok' ? 'running'
+                                : (($app->{status} // '') eq 'stopped' ? 'stopped' : 'degraded'),
+                            hastate => 'unmanaged',
+                        };
+                    }
+                    # POC k8s: pods aninhados sob o HOST REAL (Server View). Cada pod
+                    # sobe com node=<no onde o pod roda>; o par (k8sapp, k8snode) da
+                    # aplicacao dona viaja junto para menus/painel resolverem a API.
+                    my %pods_by_node;
+                    for my $app (@$apps) {
+                        for my $pod (@{ $app->{pods} || [] }) {
+                            my $pn = $pod->{node} // ($app->{node} // $localnode);
+                            push @{ $pods_by_node{$pn} }, { app => $app, pod => $pod };
+                        }
+                    }
+                    # v5: hosts reais (get_nodelist) aninham seus pods na Server
+                    # View (node=<host>); nós k8s de OUTROS PVEs publicam com
+                    # node='Kubernetes' — agrupam no pseudo-host já existente e
+                    # nunca materializam host-fantasma, nem com JS antigo em
+                    # cache. O filtro da Server View os esconde; a Folder View
+                    # mostra o cluster inteiro na pasta "Kubernetes Pods".
+                    my %pve_nodes = map { $_ => 1 } @$nodelist;
+                    for my $pn (sort keys %pods_by_node) {
+                        my $group = $pve_nodes{$pn} ? $pn : 'Kubernetes';
+                        for my $e (@{ $pods_by_node{$pn} }) {
+                            my ($owner, $pod) = ($e->{app}, $e->{pod});
+                            push @$res, {
+                                id => "k8spod/$pn/" . $pod->{name},
+                                type => 'k8spod',
+                                k8sapp => $owner->{namespace} . "/" . $owner->{name},
+                                node => $group,
+                                k8snode => ($owner->{node} // $localnode),
+                                name => $pod->{name},
+                                text => $pod->{name},
+                                # pod nao tem estado 'stopped' no snapshot: running/neutro
+                                status => (($pod->{status} // '') =~ /running/i) ? 'running' : 'degraded',
+                                hastate => 'unmanaged',
+                            };
+                        }
                     }
                 };    # falha silenciosa: sem apps.json a árvore segue normal
             }
@@ -158,11 +323,115 @@ patch(
     marker="'stopped' : 'degraded'),",
 )
 
+OLD_INSTALLED_BLOCK = '        # POC k8s (k8s-poc): aplicações Kubernetes como recursos da árvore\n        if (!$param->{type} || $param->{type} eq \'k8sapp\') {\n            my $appsfile = \'/usr/share/pve-manager/js/k8s/apps.json\';\n            if (-f $appsfile) {\n                eval {\n                    open(my $fh, \'<\', $appsfile) or die "open: $!";\n                    local $/;\n                    my $raw = <$fh>;\n                    close($fh);\n                    my $apps = decode_json($raw)->{apps} || [];\n                    for my $app (@$apps) {\n                        next if !$rpcenv->check($authuser, "/nodes/$app->{node}", [\'Sys.Audit\'], 1);\n                        push @$res, {\n                            id => "k8sapp/$app->{namespace}/$app->{name}",\n                            type => \'k8sapp\',\n                            k8sapp => "$app->{namespace}/$app->{name}",\n                            node => $app->{node},\n                            name => $app->{name},\n                            text => "$app->{name} [$app->{namespace}]",\n                            # \'running\'/\'stopped\' recebem o tratamento CSS padrao; \'degraded\' fica neutro\n                            status => ($app->{status} // \'\') eq \'ok\' ? \'running\'\n                                : (($app->{status} // \'\') eq \'stopped\' ? \'stopped\' : \'degraded\'),\n                            hastate => \'unmanaged\',\n                        };\n                    }\n                };    # falha silenciosa: sem apps.json a árvore segue normal\n            }\n        }\n'
+# upgrade: instalacoes anteriores agrupavam os apps sob o no PVE local
+# (node => $app->{node}). O bloco novo publica o pseudo-host 'Kubernetes' e o
+# no real no campo k8snode. Se o bloco antigo estiver instalado, substitui;
+# se o novo ja estiver, skip; se nenhum (instalacao limpa), o patch primario
+# acima insere o bloco novo.
+_NEW_BLOCK_MARKER = "node => 'Kubernetes',"
+_PODS_MARKER = "type => 'k8spod',"
+with open(CLUSTER, encoding="utf-8") as f:
+    _cl = f.read()
+if _PODS_MARKER in _cl:
+    print("[skip] Cluster.pm: bloco k8sapp+k8spod (pseudo-host + pods por no real) ja aplicado")
+elif K8S_BLOCK_V2.strip() in _cl:
+    _new = _cl.replace(K8S_BLOCK_V2.strip(), k8s_block.rstrip("\n"), 1)
+    if _PODS_MARKER not in _new:
+        print("[erro] Cluster.pm: upgrade v2->v3 nao substituiu o bloco (texto divergente)")
+        sys.exit(1)
+    with open(CLUSTER, "w", encoding="utf-8") as f:
+        f.write(_new)
+    print("[ok] Cluster.pm: bloco atualizado com pods por no real (upgrade v2 -> v3)")
+elif OLD_INSTALLED_BLOCK in _cl:
+    with open(CLUSTER, "w", encoding="utf-8") as f:
+        f.write(_cl.replace(OLD_INSTALLED_BLOCK, k8s_block.rstrip("\n"), 1))
+    print("[ok] Cluster.pm: bloco k8sapp atualizado para pseudo-host Kubernetes (upgrade)")
+else:
+    print("[info] Cluster.pm: bloco k8sapp ausente — patch primario aplica o novo")
+
+
+# upgrade v3 -> v4: instalações com o bloco de pods já aplicado não têm o
+# filtro por hosts reais (%pve_nodes) -> a Server View materializa
+# hosts-fantasma para nós k8s gerenciados por OUTROS PVEs mesmo com o
+# filtro client-side: navegadores com JS em cache não o
+# possuem. Publicar só os pods deste PVE resolve para QUALQUER cliente.
+_V4_MARKER = "my %pve_nodes"
+_V3_PODS_ANCHOR = (
+    "                    for my $pn (sort keys %pods_by_node) {\n"
+    "                        for my $e (@{ $pods_by_node{$pn} }) {\n"
+)
+_V4_PODS_TEXT = (
+    "                    # v4: só publica pods cujo nó existe NESTE PVE (get_nodelist).\n"
+    "                    # Sem isso a Server View materializa hosts-fantasma para nós\n"
+    "                    # k8s de outros PVEs na árvore local.\n"
+    "                    my %pve_nodes = map { $_ => 1 } @$nodelist;\n"
+    "                    for my $pn (sort keys %pods_by_node) {\n"
+    "                        next if !$pve_nodes{$pn};\n"
+    "                        for my $e (@{ $pods_by_node{$pn} }) {\n"
+)
+with open(CLUSTER, encoding="utf-8") as f:
+    _cl4 = f.read()
+if _V4_MARKER in _cl4:
+    print("[skip] Cluster.pm: filtro de pods por hosts reais (v4) ja aplicado")
+elif _cl4.count(_V3_PODS_ANCHOR) == 1:
+    with open(CLUSTER, "w", encoding="utf-8") as f:
+        f.write(_cl4.replace(_V3_PODS_ANCHOR, _V4_PODS_TEXT, 1))
+    print("[ok] Cluster.pm: pods restritos aos hosts deste PVE (upgrade v3 -> v4)")
+else:
+    print(f"[erro] Cluster.pm: ancora v3 dos pods encontrada {_cl4.count(_V3_PODS_ANCHOR)}x (esperado 1)")
+    sys.exit(1)
+
+
+# upgrade v4 -> v5: o v4 escondia do SERVIDOR os pods de nos gerenciados por
+# outros PVEs -- a Folder View ficava so com os pods locais. v5 publica o
+# cluster inteiro com agrupamento seguro: pods de hosts DESTE PVE sobem com
+# node=<host real> (aninham na Server View); os demais sobem com
+# node='Kubernetes' -- agrupam no pseudo-host ja existente e nunca
+# materializam host-fantasma (nem em navegadores com JS antigo em cache, que
+# nao possuem o filtro client-side da Server View).
+_V5_MARKER = "my $group = $pve_nodes{$pn}"
+_V4_PODS_ANCHOR = (
+    "                    for my $pn (sort keys %pods_by_node) {\n"
+    "                        next if !$pve_nodes{$pn};\n"
+    "                        for my $e (@{ $pods_by_node{$pn} }) {\n"
+)
+_V5_LOOP_TEXT = (
+    "                    for my $pn (sort keys %pods_by_node) {\n"
+    "                        # v5: hosts deste PVE aninham seus pods (node=<host>);\n"
+    "                        # nos de outros PVEs publicam com node='Kubernetes' --\n"
+    "                        # agrupam no pseudo-host existente e nunca criam\n"
+    "                        # host-fantasma. Server View filtra os remotos;\n"
+    "                        # Folder View mostra o cluster inteiro.\n"
+    "                        my $group = $pve_nodes{$pn} ? $pn : 'Kubernetes';\n"
+    "                        for my $e (@{ $pods_by_node{$pn} }) {\n"
+)
+with open(CLUSTER, encoding="utf-8") as f:
+    _cl5 = f.read()
+if _V5_MARKER in _cl5:
+    print("[skip] Cluster.pm: pods remotos agrupados no pseudo-host (v5) ja aplicado")
+elif _cl5.count(_V4_PODS_ANCHOR) == 1:
+    _new5 = _cl5.replace(_V4_PODS_ANCHOR, _V5_LOOP_TEXT, 1)
+    _npn = _new5.count("node => $pn,")
+    if _npn != 1:
+        print(f"[erro] Cluster.pm: 'node => $pn,' encontrado {_npn}x (esperado 1)")
+        sys.exit(1)
+    _new5 = _new5.replace("node => $pn,", "node => $group,", 1)
+    with open(CLUSTER, "w", encoding="utf-8") as f:
+        f.write(_new5)
+    print("[ok] Cluster.pm: cluster inteiro publicado sem hosts-fantasma (upgrade v4 -> v5)")
+else:
+    print(f"[erro] Cluster.pm: ancora v4 dos pods encontrada {_cl5.count(_V4_PODS_ANCHOR)}x (esperado 1)")
+    sys.exit(1)
+
+
 # POC k8s (k8s-poc): rede do Kubernetes no Datacenter (/cluster/k8snet/network)
+# Ancora: ReplicationConfig existe em 9.1.x e 9.2.x (Cluster::Qemu so a partir
+# da 9.2) — mantem o patcher compativel com ambas as versoes.
 patch(
     CLUSTER,
-    "use PVE::API2::Cluster::Qemu;\n",
-    "use PVE::API2::Cluster::K8sNet; # POC k8s (k8s-poc)\nuse PVE::API2::Cluster::Qemu;\n",
+    "use PVE::API2::ReplicationConfig;\n",
+    "use PVE::API2::Cluster::K8sNet; # POC k8s (k8s-poc)\nuse PVE::API2::ReplicationConfig;\n",
     "Cluster.pm: use K8sNet",
     marker="use PVE::API2::Cluster::K8sNet;",
 )
@@ -302,6 +571,24 @@ if PUBLISH_CRON not in _lines:
     print("[ok] cron k8snet snapshot instalado (1 min)")
 else:
     print("[skip] cron k8snet snapshot ja ativo")
+
+# gen-k8s-status: publica apps.json/status.json/history.json a cada minuto
+# (instalacoes antigas nao tinham essa entrada — era criada a mao).
+GEN_CRON = "* * * * * /usr/local/sbin/gen-k8s-status.py >/dev/null 2>&1"
+if GEN_CRON not in _lines:
+    _lines.append(GEN_CRON)
+    subprocess.run(
+        [
+            "crontab",
+            "-",
+        ],
+        input=chr(10).join(_lines) + chr(10),
+        text=True,
+        check=True,
+    )
+    print("[ok] cron gen-k8s-status instalado (1 min)")
+else:
+    print("[skip] cron gen-k8s-status ja ativo")
 
 # NodeK8sNet.pm e carregado pelo pvedaemon (via Nodes.pm) -> entra no
 # calculo de freshness logo abaixo.
@@ -467,7 +754,10 @@ dc_k8s_items = (
     "            }\n"
     "\n"
 )
-dc_anchor = (
+# Variantes por versao do PVE: 9.2.x encerra a familia SDN em "Prefix Lists";
+# 9.1.x encerra em "Fabrics" (ainda sem Prefix Lists). patch() usa a primeira
+# que casar exatamente 1x.
+_dc_prefixlists = (
     "                {\n"
     "                    xtype: 'pveSDNPrefixLists',\n"
     "                    groups: ['sdn'],\n"
@@ -481,24 +771,28 @@ dc_anchor = (
     "                },\n"
     "            );\n"
     "\n"
-    "            if (Proxmox.UserName === 'root@pam') {\n"
+)
+_dc_fabrics = (
+    "                    {\n"
+    "                        xtype: 'pveSDNFabricView',\n"
+    "                        groups: ['sdn'],\n"
+    "                        title: gettext('Fabrics'),\n"
+    "                        hidden: true,\n"
+    "                        iconCls: 'fa fa-road',\n"
+    "                        itemId: 'sdnfabrics',\n"
+    "                    },\n"
+    "                );\n"
+    "            }\n"
+    "\n"
+)
+_dc_guard = "            if (Proxmox.UserName === 'root@pam') {\n"
+dc_anchor = (
+    _dc_prefixlists + _dc_guard,
+    _dc_fabrics + _dc_guard,
 )
 dc_replacement = (
-    "                {\n"
-    "                    xtype: 'pveSDNPrefixLists',\n"
-    "                    groups: ['sdn'],\n"
-    "                    // TRANSLATORS: Refers to an FRR prefix list, some\n"
-    "                    // languages may prefer to keep \"prefix list\" as-is:\n"
-    "                    // https://docs.frrouting.org/en/latest/filter.html#ip-prefix-list\n"
-    "                    title: gettext('Prefix Lists'),\n"
-    "                    hidden: true,\n"
-    "                    iconCls: 'fa fa-list-ol',\n"
-    "                    itemId: 'sdnprefixlists',\n"
-    "                },\n"
-    "            );\n"
-    "\n"
-    + dc_k8s_items
-    + "            if (Proxmox.UserName === 'root@pam') {\n"
+    _dc_prefixlists + dc_k8s_items + _dc_guard,
+    _dc_fabrics + dc_k8s_items + _dc_guard,
 )
 patch(
     JS,
@@ -551,6 +845,9 @@ patch(
     "            case 'k8sapp':\n                return 1.5;\n"
     "            case 'sdn':\n                return 3;",
     "pvemanagerlib.js: getTypeOrder k8sapp",
+    # marker curto: a secao 5a reescreve o bloco com k8sapp+k8spod; sem isso o
+    # marker default (texto completo) nao casa e o patch DUPLICA o case k8sapp.
+    marker="case 'k8sapp':",
 )
 
 # painel de detalhe ao clicar numa app
@@ -648,6 +945,146 @@ else:
         marker=_GUARD_K8SMENU,
     )
 
+
+
+# POC k8s (k8s-poc): campo k8snode no model do ResourceStore — o no real que
+# serve a API viaja junto do registro (o 'node' do registro e o pseudo-host).
+patch(
+    JS,
+    """            k8sapp: {
+                header: gettext('Kubernetes App'),
+                type: 'string',
+                hidden: true,
+                sortable: true,
+                width: 110,
+            },
+""",
+    """            k8sapp: {
+                header: gettext('Kubernetes App'),
+                type: 'string',
+                hidden: true,
+                sortable: true,
+                width: 110,
+            },
+            k8snode: {
+                header: gettext('Kubernetes Node'),
+                type: 'string',
+                hidden: true,
+                sortable: true,
+                width: 110,
+            },
+""",
+    "pvemanagerlib.js: ResourceStore campo k8snode",
+    marker="header: gettext('Kubernetes Node'),",
+)
+
+# POC k8s (k8s-poc): o pseudo-host 'Kubernetes' (grupo node/Kubernetes criado
+# pela propria arvore na Server View) abre o painel cluster-wide do plugin, nao
+# o PVE.node.Config (que chamaria /nodes/Kubernetes/* e falharia com 500).
+patch(
+    JS,
+    "                                treeTypeToClass[treeNode.data.type || 'root'] || 'pvePanelConfig',\n",
+    "                                (treeNode.data.type === 'node' && treeNode.data.node === 'Kubernetes')\n"
+    "                                    ? 'pveK8sClusterBrowser' // POC k8s (k8s-poc): pseudo-host do cluster\n"
+    "                                    : treeTypeToClass[treeNode.data.type || 'root'] || 'pvePanelConfig',\n",
+    "pvemanagerlib.js: pseudo-host Kubernetes abre painel do cluster",
+    marker="'pveK8sClusterBrowser'",
+)
+
+# POC k8s (k8s-poc): o pseudo-host 'Kubernetes' nao e um no PVE — sem menu de
+# contexto de no (Start/Shutdown/Shell chamariam rotas inexistentes).
+patch(
+    JS,
+    """            } else if (type === 'qemu' || type === 'lxc' || type === 'node') {
+                menu = Ext.create('PVE.' + type + '.CmdMenu', {
+                    pveSelNode: record,
+                    nodename: record.data.node,
+                });
+""",
+    """            } else if (type === 'node' && record?.data?.node === 'Kubernetes') {
+                // POC k8s (k8s-poc): pseudo-host Kubernetes, sem menu de no PVE
+                return undefined;
+            } else if (type === 'qemu' || type === 'lxc' || type === 'node') {
+                menu = Ext.create('PVE.' + type + '.CmdMenu', {
+                    pveSelNode: record,
+                    nodename: record.data.node,
+                });
+""",
+    "pvemanagerlib.js: dispatcher ignora pseudo-host Kubernetes",
+    marker="pseudo-host Kubernetes, sem menu de no PVE",
+)
+
+# ---------- 5a) pods do Kubernetes aninhados sob o host real (k8spod) ----------
+# Cada pod sobe como recurso k8spod com node=<no real onde roda>: na Server
+# View a arvore aninha os pods DENTRO do host correspondente; na Folder View
+# eles caem na pasta "Kubernetes Pods" (cluster inteiro). Menu/painel usam
+# k8snode (no da API) + k8sapp (app dona) do proprio registro.
+
+patch(
+    CLUSTER,
+    "                enum => ['vm', 'storage', 'node', 'sdn', 'k8sapp'],\n",
+    "                enum => ['vm', 'storage', 'node', 'sdn', 'k8sapp', 'k8spod'],\n",
+    "Cluster.pm: enum do filtro type (k8spod)",
+    marker="enum => ['vm', 'storage', 'node', 'sdn', 'k8sapp', 'k8spod'],",
+)
+patch(
+    CLUSTER,
+    "                        ['node', 'storage', 'pool', 'qemu', 'lxc', 'openvz', 'sdn', 'network', 'k8sapp'],\n",
+    "                        ['node', 'storage', 'pool', 'qemu', 'lxc', 'openvz', 'sdn', 'network', 'k8sapp', 'k8spod'],\n",
+    "Cluster.pm: enum do retorno (k8spod)",
+    marker="'sdn', 'network', 'k8sapp', 'k8spod'],",
+)
+patch(
+    CLUSTER,
+    "                k8sapp => {\n                    description => \"The Kubernetes application identity (for type 'k8sapp').\",\n                    type => 'string',\n                    optional => 1,\n                },\n",
+    "                k8sapp => {\n                    description => \"The Kubernetes application identity (for type 'k8sapp').\",\n                    type => 'string',\n                    optional => 1,\n                },\n                k8spod => {\n                    description => \"The owning Kubernetes application of a pod (for type 'k8spod').\",\n                    type => 'string',\n                    optional => 1,\n                },\n",
+    "Cluster.pm: schema do campo k8spod",
+    marker="The owning Kubernetes application of a pod",
+)
+
+patch(
+    JS,
+    "            k8sapp: {\n                iconCls: 'fa fa-ship',\n                text: gettext('Kubernetes Applications'),\n            },\n",
+    "            k8sapp: {\n                iconCls: 'fa fa-ship',\n                text: gettext('Kubernetes Applications'),\n            },\n            k8spod: {\n                iconCls: 'fa fa-ship',\n                text: gettext('Kubernetes Pods'),\n            },\n",
+    "pvemanagerlib.js: typeDefaults k8spod",
+    marker="text: gettext('Kubernetes Pods'),",
+)
+patch(
+    JS,
+    "            case 'k8sapp':\n                return 1.5;\n",
+    "            case 'k8sapp':\n                return 1.5;\n            case 'k8spod':\n                return 1.9;\n",
+    "pvemanagerlib.js: getTypeOrder k8spod",
+    marker="case 'k8spod':",
+)
+patch(
+    JS,
+    "            k8snode: {\n                header: gettext('Kubernetes Node'),\n                type: 'string',\n                hidden: true,\n                sortable: true,\n                width: 110,\n            },\n",
+    "            k8snode: {\n                header: gettext('Kubernetes Node'),\n                type: 'string',\n                hidden: true,\n                sortable: true,\n                width: 110,\n            },\n            k8spod: {\n                header: gettext('Kubernetes Pod'),\n                type: 'string',\n                hidden: true,\n                sortable: true,\n                width: 110,\n            },\n",
+    "pvemanagerlib.js: ResourceStore campo k8spod",
+    marker="header: gettext('Kubernetes Pod'),",
+)
+patch(
+    JS,
+    "                            k8sapp: 'pveK8sAppBrowser',\n",
+    "                            k8sapp: 'pveK8sAppBrowser',\n                            k8spod: 'pveK8sPodPanel',\n",
+    "pvemanagerlib.js: treeTypeToClass k8spod",
+    marker="k8spod: 'pveK8sPodPanel',",
+)
+patch(
+    JS,
+    "            } else if (type === 'tag') {\n                menu = Ext.create('PVE.dc.TagCmdMenu', {\n",
+    "            } else if (type === 'k8spod') {\n                // POC k8s (k8s-poc): menu de pod -- mesma guarda do k8sapp\n                if (Ext.ClassManager.get('PVE.k8spod.CmdMenu')) {\n                    menu = Ext.create('PVE.k8spod.CmdMenu', {\n                        pveSelNode: record,\n                    });\n                } else {\n                    return undefined;\n                }\n            } else if (type === 'tag') {\n                menu = Ext.create('PVE.dc.TagCmdMenu', {\n",
+    "pvemanagerlib.js: dispatcher CmdMenu k8spod",
+    marker="PVE.k8spod.CmdMenu",
+)
+patch(
+    JS,
+    "            server: {\n                text: gettext('Server View'),\n                groups: ['node'],\n            },\n",
+    "            server: {\n                text: gettext('Server View'),\n                groups: ['node'],\n                // POC k8s (k8s-poc): Server View filtra pods sem vinculo -- cada\n                // k8spod so aparece dentro do host onde o pod realmente roda.\n                getFilterFn: () =>\n                    ({ data }) =>\n                        data.type !== 'k8spod' ||\n                        PVE.data.ResourceStore.getData().items.some(\n                            r => r.data.type === 'node' && r.data.id === `node/${data.node}`,\n                        ),\n            },\n",
+    "pvemanagerlib.js: Server View filtra pods sem vinculo ao host",
+    marker="Server View filtra pods sem vinculo",
+)
+
 # ---------- 5b) cache-busting dos assets patchados ----------
 # O PVE versiona os scripts com "?ver=[% version %]" (versao do PACOTE
 # pve-manager). Nossos patches alteram pvemanagerlib.js e app-browser.js SEM
@@ -665,6 +1102,20 @@ def _digest(path):
         h.update(fh.read())
     return h.hexdigest()
 
+
+# marca de versao: muda o CONTEUDO do JS (e portanto o token) quando o
+# comportamento da UI muda, mesmo que os patches JS em si nao mudem (ex.: v4,
+# cuja mudanca foi no servidor). Sem isso o token pode voltar a um valor
+# antigo e clientes/proxies com copia velha sob essa URL seguem servindo-a.
+K8SPOC_JS_VERSION = "v5"
+with open(JS, "ab") as _f:
+    stamp = f"\n// k8spoc-js-{K8SPOC_JS_VERSION}\n".encode()
+    _cur = open(JS, "rb").read()
+    if stamp not in _cur:
+        _f.write(stamp)
+        print(f"[ok] pvemanagerlib.js: marca de versao {K8SPOC_JS_VERSION} (força novo token)")
+    else:
+        print(f"[skip] pvemanagerlib.js: marca {K8SPOC_JS_VERSION} ja presente")
 
 _parts = [_digest(JS)]
 if os.path.exists(APP_BROWSER):

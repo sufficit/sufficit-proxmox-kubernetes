@@ -43,13 +43,26 @@ verify() {
   grep -q "pveK8sNetworkPanel" "$K8S_DIR/app-browser.js" 2>/dev/null && grep -q "Cluster nodes" "$K8S_DIR/app-browser.js" && ok "painel com grade multi-no" || fail "app-browser.js sem grade multi-no"
   grep -q "itemId: 'kubernetesnetwork'," "$JS" && ok "submenu Datacenter Kubernetes/Network" || fail "submenu Kubernetes/Network ausente"
   grep -q "k8sapp: 'pveK8sAppBrowser'," "$JS" && ok "k8sapp abre painel pveK8sAppBrowser" || fail "treeTypeToClass sem k8sapp"
-  grep -q "enum => \['vm', 'storage', 'node', 'sdn', 'k8sapp'\]" "$CLUSTER_PM" && ok "Cluster.pm: filtro type aceita k8sapp" || fail "Cluster.pm: enum sem k8sapp"
+  grep -q "enum => \['vm', 'storage', 'node', 'sdn', 'k8sapp', 'k8spod'\]" "$CLUSTER_PM" && ok "Cluster.pm: filtro type aceita k8sapp+k8spod" || fail "Cluster.pm: enum sem k8sapp/k8spod"
   grep -q "itemId: 'kubernetes'," "$JS" && ok "aba Kubernetes no pvemanagerlib.js" || fail "aba Kubernetes ausente"
   grep -q "k3s: true," "$JS" && ok "k3s em startOnlyServices (protegido contra Stop pela UI)" || fail "startOnlyServices sem k3s"
   grep -q "k8sapp: {" "$JS" && ok "tipo k8sapp em typeDefaults (ícone/label na árvore)" || fail "typeDefaults sem k8sapp"
   grep -q "src: '/pve2/js/k8s/index.html'," "$JS" && ok "iframe apontando para /pve2/js/k8s/" || fail "iframe ausente"
   grep -q "k8s/app-browser.js" "$TPL" && ok "index.html.tpl carrega app-browser.js" || fail "TPL sem app-browser.js"
   grep -q "Ext.ClassManager.get('PVE.k8sapp.CmdMenu')" "$JS" && ok "dispatcher createCmdMenu com guarda (menu k8sapp)" || fail "dispatcher CmdMenu sem k8sapp/guarda"
+
+  grep -q "k8snode" "$CLUSTER_PM" && ok "Cluster.pm: apps sob o pseudo-host Kubernetes (k8snode = no real)" || fail "Cluster.pm sem agrupamento pseudo-host/k8snode"
+  grep -q "'pveK8sClusterBrowser'" "$JS" && ok "pseudo-host Kubernetes abre painel do cluster (dispatch)" || fail "dispatch do pseudo-host ausente"
+  grep -q "pveK8sClusterBrowser" "$K8S_DIR/app-browser.js" 2>/dev/null && ok "painel cluster-wide do pseudo-host presente" || fail "app-browser.js sem painel do pseudo-host"
+  grep -q "pseudo-host Kubernetes, sem menu de no PVE" "$JS" && ok "dispatcher: pseudo-host sem menu de no" || fail "dispatcher sem guarda do pseudo-host"
+  grep -q "type => 'k8spod'," "$CLUSTER_PM" && ok "Cluster.pm: pods k8spod aninhados por no real" || fail "Cluster.pm sem pods k8spod"
+  grep -q "my %pve_nodes" "$CLUSTER_PM" && ok "Cluster.pm: pods publicados sem hosts-fantasma" || fail "Cluster.pm sem filtro de hosts reais nos pods"
+  grep -q 'my $group = $pve_nodes{$pn}' "$CLUSTER_PM" && ok "Cluster.pm: pods remotos no pseudo-host Kubernetes (v5, Folder View completa)" || fail "Cluster.pm sem agrupamento v5 dos pods"
+  grep -q "k8spod: 'pveK8sPodPanel'," "$JS" && ok "k8spod abre painel pveK8sPodPanel" || fail "treeTypeToClass sem k8spod"
+  grep -q "PVE.k8spod.CmdMenu" "$JS" && ok "dispatcher CmdMenu k8spod" || fail "dispatcher sem k8spod"
+  grep -q "Server View filtra pods" "$JS" && ok "Server View: pods so no host onde rodam" || fail "filtro Server View ausente"
+  grep -q "pveK8sPodPanel" "$K8S_DIR/app-browser.js" 2>/dev/null && ok "app-browser.js com painel de pod" || fail "app-browser.js sem painel de pod"
+  grep -q "Restricts describe to the given pod" "$K8SAPP_PM" && ok "describe aceita pod (menu do pod)" || fail "describe sem parametro pod"
 
   echo "== Arquivos =="
   [ -s "$K8S_DIR/index.html" ] && ok "index.html presente" || fail "index.html ausente"
@@ -67,10 +80,13 @@ verify() {
   crontab -l 2>/dev/null | grep -q gen-k8s-status && ok "cron ativo (1 min)" || fail "cron ausente"
 
   echo "== Serviços =="
-  for s in k3s pveproxy pvedaemon pvestatd docker; do
+  for s in k3s pveproxy pvedaemon pvestatd; do
     st=$(systemctl is-active "$s" 2>/dev/null)
     [ "$st" = active ] && ok "$s: active" || fail "$s: $st"
   done
+  # docker e opcional: hosts sem Docker rodam o k3s normalmente (containerd)
+  dst=$(systemctl is-active docker 2>/dev/null)
+  [ "$dst" = active ] && ok "docker: active" || ok "docker: ${dst:-ausente} (opcional)"
 
   echo "== Freshness de pvedaemon/pveproxy =="
   # .pm são carregados UMA vez: pvedaemon (Services.pm, Cluster.pm) e os
@@ -148,8 +164,11 @@ print(len(ks))" 2>/dev/null)
   fi
 
   echo "== Cluster K3s =="
-  node=$(k3s kubectl get nodes --no-headers 2>/dev/null | awk '{print $2}')
-  [ "$node" = Ready ] && ok "nó Kubernetes Ready" || fail "nó Kubernetes: ${node:-sem resposta}"
+  notready=$(k3s kubectl get nodes --no-headers 2>/dev/null | awk '$2 != "Ready"' | wc -l)
+  total=$(k3s kubectl get nodes --no-headers 2>/dev/null | wc -l)
+  [ "${total:-0}" -gt 0 ] && [ "${notready:-1}" = "0" ] \
+    && ok "cluster Kubernetes: ${total} nó(s), todos Ready" \
+    || fail "cluster Kubernetes: ${notready:-1}/${total:-0} nó(s) não Ready"
 
   echo; [ $RC -eq 0 ] && echo "RESULTADO: TUDO OK" || echo "RESULTADO: FALHAS ACIMA"
   return $RC

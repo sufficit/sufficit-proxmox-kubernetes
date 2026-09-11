@@ -904,6 +904,7 @@ __PACKAGE__->register_method({
         properties => {
             node => get_standard_option('pve-node'),
             appid => { type => 'string', description => 'Namespace:name application identifier.' },
+            pod => { type => 'string', description => 'Restricts describe to the given pod.', optional => 1 },
             format => { type => 'string', enum => ['describe', 'yaml'], optional => 1,
                 default => 'describe' },
         },
@@ -918,9 +919,26 @@ __PACKAGE__->register_method({
         check_audit($param->{node});
         my ($ns, $app, $target) = mutable_target($param->{appid});
         my $format = $param->{format} // 'describe';
-        my @args = $format eq 'yaml'
-            ? ('get', $target, '-o', 'yaml')
-            : ('describe', $target);
+        my @args;
+        if (defined($param->{pod}) && $param->{pod} ne '') {
+            # POC k8s: describe/yaml de um pod especifico da aplicacao (menu do
+            # pod na arvore). Valida que o pod pertence a app antes do kubectl.
+            my $appdata = app_from_id($param->{appid});
+            raise_param_exc({ appid => 'Kubernetes application not found' }) if !$appdata;
+            my $allowed = 0;
+            for my $p (@{ $appdata->{pods} || [] }) {
+                if (($p->{name} // '') eq $param->{pod}) { $allowed = 1; last; }
+            }
+            raise_param_exc({ pod => 'Pod does not belong to this application' }) if !$allowed;
+            my $podname = launder($param->{pod}, 'pod');
+            @args = $format eq 'yaml'
+                ? ('get', 'pod', $podname, '-o', 'yaml')
+                : ('describe', 'pod', $podname);
+        } else {
+            @args = $format eq 'yaml'
+                ? ('get', $target, '-o', 'yaml')
+                : ('describe', $target);
+        }
         my @lines = split(/\n/, run_kubectl('-n', $ns, @args), -1);
         pop @lines if @lines && $lines[-1] eq '';
         my $n = 1;

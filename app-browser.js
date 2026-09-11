@@ -758,13 +758,21 @@ Ext.define('PVE.k8s.Console', {
         let container = me.down('#container');
         if (pod && me.podStore.getCount()) {
             let prev = pod.getValue();
-            let keep = prev && me.podStore.findExact('name', prev) >= 0;
-            pod.setValue(keep ? prev : me.podStore.first().get('name'));
+            // Pod pre-selecionado (acao vinda do menu de um pod na arvore): vale
+            // na primeira selecao; depois o combobox segue a escolha do usuario.
+            let want = (me.initialPod && me.podStore.findExact('name', me.initialPod) >= 0)
+                ? me.initialPod : prev;
+            let keep = want && me.podStore.findExact('name', want) >= 0;
+            pod.setValue(keep ? want : me.podStore.first().get('name'));
+            me.initialPod = null;
         }
         if (container && me.containerStore.getCount()) {
             let prev = container.getValue();
-            let keep = prev && me.containerStore.findExact('name', prev) >= 0;
-            container.setValue(keep ? prev : me.containerStore.first().get('name'));
+            let want = (me.initialContainer && me.containerStore.findExact('name', me.initialContainer) >= 0)
+                ? me.initialContainer : prev;
+            let keep = want && me.containerStore.findExact('name', want) >= 0;
+            container.setValue(keep ? want : me.containerStore.first().get('name'));
+            me.initialContainer = null;
         }
         if (me.mode === 'logs') me.loadLogs();
     },
@@ -1152,10 +1160,31 @@ PVE.k8s.setPending = function (appid, action, params) {
     PVE.k8s.refreshTreeIcons();
 };
 
+
+/* POC k8s: o pseudo-host 'Kubernetes' nao e um no PVE — o duplo clique nao
+ * deve tentar abrir o shell do no (rota /nodes/Kubernetes inexistente).
+ * Envolve o openTreeConsole nativo; o binding da arvore resolve a funcao na
+ * criacao da instancia, ja depois deste override (mesmo padrao do wrapper de
+ * icone acima). */
+(function wrapOpenTreeConsole() {
+    let orig = PVE.Utils.openTreeConsole;
+    if (typeof orig !== 'function') return;
+    PVE.Utils.openTreeConsole = function () {
+        let rec = arguments[1];
+        let d = rec && rec.data;
+        if (d && d.type === 'node' && d.node === 'Kubernetes') return;
+        return orig.apply(this, arguments);
+    };
+})();
+
 (function wrapIconClass() {
     let orig = PVE.Utils.get_object_icon_class;
     PVE.Utils.get_object_icon_class = function (type, record) {
         let cls = orig.apply(this, arguments);
+        if (record && record.type === 'node' && record.node === 'Kubernetes') {
+            // pseudo-host Kubernetes: navio, nao o predio dos nos PVE
+            return 'fa fa-ship';
+        }
         if (cls && record && record.type === 'k8sapp' && record.k8sapp &&
             PVE.k8s.pending[PVE.k8s.pendingKey(record.k8sapp)]) {
             cls += ' k8s-pending';
@@ -1319,13 +1348,14 @@ Ext.define('PVE.k8s.LogsWindow', {
         me.items = {
             xtype: 'pveK8sConsole', itemId: 'console', node: me.node, appid: me.appid,
             defaultMode: me.defaultMode,
+            initialPod: me.pod, initialContainer: me.container,
         };
         me.buttons = [{ text: gettext('Close'), handler: 'close' }];
         me.callParent();
         PVE.k8s.getApp(me.appid, app => {
             if (app) {
                 me.down('#console').setApp(app);
-            } else {
+            } else if (!me.pod) {
                 me.down('#console').loadLogs();
             }
         });
@@ -1349,6 +1379,7 @@ Ext.define('PVE.k8s.ConsoleWindow', {
         me.items = {
             xtype: 'pveK8sConsole', itemId: 'console', node: me.node, appid: me.appid,
             defaultMode: 'shell',
+            initialPod: me.pod, initialContainer: me.container,
         };
         me.buttons = [{ text: gettext('Close'), handler: 'close' }];
         me.callParent();
@@ -1412,7 +1443,12 @@ Ext.define('PVE.k8sapp.CmdMenu', {
         let me = this;
 
         let info = me.pveSelNode.data;
-        if (!info.node) {
+        // POC k8s: na arvore os apps vivem sob o pseudo-host 'Kubernetes'; o
+        // no real que executa o k3s (alvo das chamadas /nodes/{node}/k8sapp)
+        // viaja no campo k8snode do registro da arvore.
+        let apiNode = (info.k8snode && info.k8snode !== 'Kubernetes')
+            ? info.k8snode : info.node;
+        if (!apiNode) {
             throw 'no node name specified';
         }
         let appid = (info.k8sapp || '').replace('/', ':');
@@ -1432,10 +1468,10 @@ Ext.define('PVE.k8sapp.CmdMenu', {
 
         let k8s_command = (action, message) =>
             message
-                ? PVE.k8s.confirmAction(info.node, appid, action, {}, message, name)
-                : PVE.k8s.runAction(info.node, appid, action, {}, name);
+                ? PVE.k8s.confirmAction(apiNode, appid, action, {}, message, name)
+                : PVE.k8s.runAction(apiNode, appid, action, {}, name);
         let window_command = (winClass, cfg) =>
-            Ext.create(winClass, Ext.apply({ node: info.node, appid, appname: name }, cfg)).show();
+            Ext.create(winClass, Ext.apply({ node: apiNode, appid, appname: name }, cfg)).show();
 
         me.title = `K8s ${name}`;
 
@@ -1524,7 +1560,7 @@ Ext.define('PVE.k8sapp.CmdMenu', {
                 disabled: !audit,
                 handler: () => window_command('PVE.k8s.OutputWindow', {
                     title: gettext('Describe application'),
-                    apiUrl: `/nodes/${info.node}/k8sapp/${appid}/describe`,
+                    apiUrl: `/nodes/${apiNode}/k8sapp/${appid}/describe`,
                     params: { format: 'describe' },
                 }),
             },
@@ -1535,7 +1571,7 @@ Ext.define('PVE.k8sapp.CmdMenu', {
                 disabled: !audit,
                 handler: () => window_command('PVE.k8s.OutputWindow', {
                     title: gettext('Application YAML'),
-                    apiUrl: `/nodes/${info.node}/k8sapp/${appid}/describe`,
+                    apiUrl: `/nodes/${apiNode}/k8sapp/${appid}/describe`,
                     params: { format: 'yaml' },
                 }),
             },
@@ -1546,7 +1582,7 @@ Ext.define('PVE.k8sapp.CmdMenu', {
                 disabled: !audit,
                 handler: () => window_command('PVE.k8s.OutputWindow', {
                     title: gettext('Rollout status'),
-                    apiUrl: `/nodes/${info.node}/k8sapp/${appid}/rollout`,
+                    apiUrl: `/nodes/${apiNode}/k8sapp/${appid}/rollout`,
                 }),
             },
         ];
@@ -1579,6 +1615,160 @@ Ext.define('PVE.k8sapp.CmdMenu', {
             set('#console', !consoleCap || !(app.pods || []).length);
             set('#logs', !consoleCap || !(app.pods || []).length);
         });
+    },
+});
+
+
+/*
+ * Panel do pseudo-host "Kubernetes" na arvore (node/Kubernetes). O Datacenter
+ * mostra o cluster k3s como se fosse um host: clicar abre esta visao
+ * cluster-wide com TODAS as aplicacoes (inclusive as que nao rodam neste no
+ * PVE) e o resumo do no que publica o snapshot. Somente leitura aqui -- as
+ * mutacoes (Start/Stop/Scale/...) continuam no menu de contexto e na toolbar
+ * do painel de cada aplicacao. Duplo clique numa linha navega ate a app na
+ * arvore.
+ */
+Ext.define('PVE.k8s.ClusterBrowser', {
+    extend: 'PVE.panel.Config',
+    alias: 'widget.pveK8sClusterBrowser',
+
+    onlineHelp: 'pve_service_daemons',
+
+    initComponent: function () {
+        let me = this;
+
+        let appStore = Ext.create('Ext.data.Store', {
+            fields: ['name', 'namespace', 'kind', 'status', 'ready', 'desired', 'nodes', 'appid'],
+            sorters: [{ property: 'namespace' }, { property: 'name' }],
+            data: [],
+        });
+        let nodeStore = Ext.create('Ext.data.Store', {
+            fields: ['key', 'value'],
+            data: [],
+        });
+
+        let statusRenderer = v => {
+            let map = {
+                ok: [gettext('Running'), '#21a666'],
+                stopped: [gettext('Stopped'), '#d99b26'],
+                degraded: [gettext('Degraded'), '#d99b26'],
+            };
+            let entry = map[v] || [v || '\u2014', '#888'];
+            return `<span style="color:${entry[1]};font-weight:600">${Ext.htmlEncode(entry[0])}</span>`;
+        };
+
+        let loadData = function (appsData, statusData) {
+            let apps = appsData.apps || [];
+            appStore.loadData(apps.map(a => {
+                let nodes = {};
+                (a.pods || []).forEach(p => { nodes[p.node] = true; });
+                let replicas = a.replicas || {};
+                return {
+                    name: a.name,
+                    namespace: a.namespace,
+                    kind: a.kind,
+                    status: a.status,
+                    ready: replicas.ready ?? 0,
+                    desired: replicas.desired ?? 0,
+                    nodes: Object.keys(nodes).sort().join(', '),
+                    appid: a.appid,
+                };
+            }));
+            let n = (statusData && statusData.node) || {};
+            let ns = (statusData && statusData.namespaces) || [];
+            let rows = {};
+            rows[gettext('Cluster node')] = n.name || '\u2014';
+            rows[gettext('Ready')] = n.ready ? gettext('Yes') : gettext('No');
+            rows[gettext('Kubelet')] = n.kubelet || '\u2014';
+            rows[gettext('Operating System')] = n.os || '\u2014';
+            rows[gettext('Kernel')] = n.kernel || '\u2014';
+            rows[gettext('CPU(s)')] = String(n.cpu ?? '\u2014');
+            rows[gettext('Memory')] = n.memoryGiB ? `${n.memoryGiB} GiB` : '\u2014';
+            rows[gettext('Namespaces')] = String(ns.length);
+            rows[gettext('Applications')] = String(apps.length);
+            nodeStore.loadData(Object.entries(rows).map(([key, value]) => ({ key, value })));
+        };
+
+        me.loadStaticData = function () {
+            let done = {};
+            let merge = function () {
+                if (!done.apps || !done.status) return;
+                loadData(done.apps, done.status);
+                let updated = me.down('#k8s-updated');
+                if (updated) {
+                    updated.update(`${gettext('Updated')}: ${Ext.htmlEncode(done.apps.generated || '\u2014')}`);
+                }
+            };
+            Ext.Ajax.request({
+                url: '/pve2/js/k8s/apps.json?_=' + Date.now(),
+                failure: () => Ext.Msg.alert(
+                    gettext('Error'),
+                    `${gettext('Failed to load')}: apps.json`,
+                ),
+                success: response => {
+                    try { done.apps = JSON.parse(response.responseText || '{}'); } catch (e) { done.apps = {}; }
+                    merge();
+                },
+            });
+            Ext.Ajax.request({
+                url: '/pve2/js/k8s/status.json?_=' + Date.now(),
+                failure: () => { done.status = {}; merge(); },
+                success: response => {
+                    try { done.status = JSON.parse(response.responseText || '{}'); } catch (e) { done.status = {}; }
+                    merge();
+                },
+            });
+        };
+
+        let summary = {
+            xtype: 'panel', itemId: 'summary', title: gettext('Summary'), iconCls: 'fa fa-book',
+            layout: 'fit',
+            items: {
+                xtype: 'grid', itemId: 'node-grid', hideHeaders: true, store: nodeStore,
+                emptyText: gettext('No data'),
+                columns: [
+                    { text: gettext('Name'), dataIndex: 'key', width: 220 },
+                    { text: gettext('Value'), dataIndex: 'value', flex: 1 },
+                ],
+            },
+        };
+
+        let appsPanel = {
+            xtype: 'grid', itemId: 'apps', title: gettext('Applications'), iconCls: 'fa fa-ship',
+            store: appStore,
+            emptyText: gettext('No data'),
+            columns: [
+                { text: gettext('Name'), dataIndex: 'name', flex: 1, renderer: v => `<code>${Ext.htmlEncode(v)}</code>` },
+                { text: gettext('Namespace'), dataIndex: 'namespace', width: 150 },
+                { text: gettext('Kind'), dataIndex: 'kind', width: 110 },
+                { text: gettext('Status'), dataIndex: 'status', width: 110, renderer: statusRenderer },
+                { text: gettext('Replicas'), dataIndex: 'ready', width: 90,
+                  renderer: (v, meta, rec) => `${rec.get('ready')}/${rec.get('desired')}` },
+                { text: gettext('Nodes'), dataIndex: 'nodes', flex: 1.2 },
+            ],
+            listeners: {
+                itemdblclick: (grid, rec) => {
+                    let tree = Ext.ComponentQuery.query('pveResourceTree')[0];
+                    let id = `k8sapp/${rec.get('namespace')}/${rec.get('name')}`;
+                    if (tree && tree.selectById) tree.selectById(id);
+                },
+            },
+        };
+
+        Ext.apply(me, {
+            title: gettext('Kubernetes Cluster'),
+            hstateid: 'k8sclustertab',
+            tbarSpacing: false,
+            tbar: [
+                { xtype: 'button', text: gettext('Refresh'), iconCls: 'fa fa-refresh',
+                  handler: () => me.loadStaticData() },
+                '->', { xtype: 'component', itemId: 'k8s-updated', html: '' },
+            ],
+            items: [summary, appsPanel],
+        });
+
+        me.callParent();
+        me.loadStaticData();
     },
 });
 
@@ -1807,7 +1997,9 @@ Ext.define('PVE.k8s.AppBrowser', {
 
     initComponent: function () {
         let me = this;
-        let node = me.pveSelNode.data.node;
+        // k8snode: no real de execucao (o 'node' do registro da arvore e o
+        // pseudo-host Kubernetes, usado apenas para o agrupamento visual).
+        let node = me.pveSelNode.data.k8snode || me.pveSelNode.data.node;
         let appid = me.staticAppId();
         // ':' is a valid path character (RFC 3986 pchar) and PVE routes like
         // {userid}/{id} already rely on it — no percent-encoding needed.
@@ -2023,5 +2215,203 @@ Ext.define('PVE.k8s.AppBrowser', {
             }
         }, me, { single: true });
         me.loadStaticData();
+    },
+});
+
+/* POC k8s: menu de contexto de um pod na arvore (tipo k8spod). O registro
+ * carrega k8snode (no real da API), k8sapp (aplicacao dona, ns/name) e
+ * name (nome do pod). As acoes reutilizam os endpoints ja existentes da
+ * aplicacao, sempre restringidos ao proprio pod. */
+Ext.define('PVE.k8spod.CmdMenu', {
+    extend: 'Ext.menu.Menu',
+
+    showSeparator: false,
+
+    initComponent: function () {
+        let me = this;
+
+        let info = me.pveSelNode.data;
+        let apiNode = (info.k8snode && info.k8snode !== 'Kubernetes')
+            ? info.k8snode : (info.node !== 'Kubernetes' ? info.node : undefined);
+        if (!apiNode) {
+            throw 'no node name specified';
+        }
+        let appid = (info.k8sapp || '').replace('/', ':');
+        let pod = info.name;
+        if (!appid || !pod) {
+            throw 'no Kubernetes pod specified';
+        }
+
+        let caps = Ext.state.Manager.get('GuiCap') || { nodes: {} };
+        let modify = !!(caps.nodes && caps.nodes['Sys.Modify']);
+        let audit = !!(caps.nodes && caps.nodes['Sys.Audit']);
+        let consoleCap = !!(caps.nodes && caps.nodes['Sys.Console']);
+
+        me.title = gettext('Pod') + ' ' + pod;
+        let win = (cls, cfg) =>
+            Ext.create(cls, Ext.apply({
+                node: apiNode, appid, appname: pod, pod,
+            }, cfg)).show();
+
+        me.items = [
+            {
+                itemId: 'console',
+                text: gettext('Console'),
+                iconCls: 'fa fa-fw fa-terminal',
+                disabled: !consoleCap,
+                tooltip: gettext('Interactive shell inside this pod'),
+                handler: () => win('PVE.k8s.ConsoleWindow'),
+            },
+            {
+                itemId: 'logs',
+                text: gettext('Pod logs'),
+                iconCls: 'fa fa-fw fa-file-text-o',
+                disabled: !consoleCap,
+                handler: () => win('PVE.k8s.LogsWindow'),
+            },
+            { xtype: 'menuseparator' },
+            {
+                itemId: 'describe',
+                text: gettext('Describe pod'),
+                iconCls: 'fa fa-fw fa-file-text-o',
+                disabled: !audit,
+                handler: () => win('PVE.k8s.OutputWindow', {
+                    title: gettext('Describe pod'),
+                    apiUrl: `/nodes/${apiNode}/k8sapp/${appid}/describe`,
+                    params: { format: 'describe', pod },
+                }),
+            },
+            {
+                itemId: 'yaml',
+                text: gettext('View YAML'),
+                iconCls: 'fa fa-fw fa-file-code-o',
+                disabled: !audit,
+                handler: () => win('PVE.k8s.OutputWindow', {
+                    title: gettext('Pod YAML'),
+                    apiUrl: `/nodes/${apiNode}/k8sapp/${appid}/describe`,
+                    params: { format: 'yaml', pod },
+                }),
+            },
+            { xtype: 'menuseparator' },
+            {
+                itemId: 'deletepod',
+                text: gettext('Delete pod'),
+                iconCls: 'fa fa-fw fa-trash-o',
+                disabled: !modify,
+                handler: () =>
+                    PVE.k8s.confirmAction(apiNode, appid, 'deletepod', { pod },
+                        gettext('Delete pod from'), pod),
+            },
+        ];
+
+        me.callParent();
+    },
+});
+
+/* POC k8s: painel de um pod (tipo k8spod) na arvore. Resumo com os campos do
+ * snapshot + Console/Logs do proprio pod (pre-selecionado). Mutacoes seguem
+ * no menu de contexto, como no painel da aplicacao. */
+Ext.define('PVE.k8s.PodPanel', {
+    extend: 'PVE.panel.Config',
+    alias: 'widget.pveK8sPodPanel',
+
+    onlineHelp: 'pve_service_daemons',
+
+    statics: {
+        appidFromRecord: function (data) {
+            return (data.k8sapp || `${data.namespace || ''}/${data.name || ''}`)
+                .replace('/', ':');
+        },
+        apiNodeFromRecord: function (data) {
+            if (data.k8snode && data.k8snode !== 'Kubernetes') return data.k8snode;
+            if (data.node && data.node !== 'Kubernetes') return data.node;
+            return (typeof PVE !== 'undefined' && PVE.NodeName) || Proxmox.NodeName;
+        },
+    },
+
+    initComponent: function () {
+        let me = this;
+        let rec = me.pveSelNode.data;
+        let appid = PVE.k8s.PodPanel.appidFromRecord(rec);
+        let apiNode = PVE.k8s.PodPanel.apiNodeFromRecord(rec);
+        let podName = rec.name;
+
+        let infoStore = Ext.create('Ext.data.Store', {
+            fields: ['key', 'value'],
+            data: [],
+        });
+
+        let summary = {
+            xtype: 'panel',
+            itemId: 'summary',
+            title: gettext('Summary'),
+            iconCls: 'fa fa-book',
+            layout: 'fit',
+            tbar: [
+                '->',
+                { xtype: 'component', itemId: 'k8s-updated', html: '' },
+            ],
+            items: {
+                xtype: 'grid', itemId: 'pod-grid', hideHeaders: true, store: infoStore,
+                emptyText: gettext('No data'),
+                columns: [
+                    { text: gettext('Name'), dataIndex: 'key', width: 220 },
+                    { text: gettext('Value'), dataIndex: 'value', flex: 1 },
+                ],
+            },
+        };
+
+        let consolePanel = {
+            xtype: 'panel',
+            itemId: 'console-tab',
+            title: gettext('Console'),
+            iconCls: 'fa fa-terminal',
+            layout: 'fit',
+            items: {
+                // PVE.panel.Config cria os cards sob demanda: alimenta o console
+                // quando ele efetivamente renderiza (primeira visita a aba).
+                xtype: 'pveK8sConsole', itemId: 'console', node: apiNode, appid,
+                defaultMode: 'shell', initialPod: podName,
+                listeners: {
+                    boxready: function () {
+                        let c = this;
+                        PVE.k8s.getApp(appid, app => {
+                            if (app && !c.destroyed && !c.podStore.getCount()) c.setApp(app);
+                        });
+                    },
+                },
+            },
+        };
+
+        Ext.apply(me, {
+            title: `${gettext('Pod')} ${podName}`,
+            hstateid: 'k8spodtab',
+            tbarSpacing: false,
+            items: [summary, consolePanel],
+        });
+
+        me.callParent();
+
+        let apply = app => {
+            if (!app || me.destroyed) return;
+            let pod = (app.pods || []).find(p => p.name === podName) || {};
+            let rows = {};
+            rows[gettext('Application')] = `${app.name} [${app.namespace}]`;
+            rows[gettext('Pod')] = pod.name || podName;
+            rows[gettext('Status')] = pod.status || '\u2014';
+            rows[gettext('Ready')] = pod.ready || '\u2014';
+            rows[gettext('Restarts')] = String(pod.restarts ?? '\u2014');
+            rows[gettext('Age')] = pod.age || '\u2014';
+            rows[gettext('Node')] = pod.node || app.node || '\u2014';
+            rows[gettext('Pod IP')] = pod.ip || '\u2014';
+            rows[gettext('Host IP')] = pod.hostip || '\u2014';
+            rows[gettext('CPU')] = pod.cpu ?? '\u2014';
+            rows[gettext('Memory')] = pod.mem || '\u2014';
+            rows[gettext('Images')] = (pod.images || []).join(', ') || '\u2014';
+            infoStore.loadData(Object.entries(rows).map(([key, value]) => ({ key, value })));
+            let updated = me.down('#k8s-updated');
+            if (updated && app.generated) updated.update(`${gettext('Updated')}: ${Ext.htmlEncode(app.generated)}`);
+        };
+        PVE.k8s.getApp(appid, apply);
     },
 });

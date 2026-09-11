@@ -117,9 +117,27 @@ test.describe('Kubernetes application context menu', () => {
   test('dispatcher builds PVE.k8sapp.CmdMenu with refined enabled state', async ({ page }) => {
     await login(page);
 
-    const created = await page.evaluate(() => {
-      const record = PVE.data.ResourceStore.getData().items
-        .find((r) => r.data.type === 'k8sapp');
+    // Prefer a Deployment so the "everything enabled" expectation holds:
+    // DaemonSets cannot be scaled and the menu (correctly) disables Scale.
+    const target = await page.evaluate(() => new Promise((resolve) => {
+      Ext.Ajax.request({
+        url: '/pve2/js/k8s/apps.json',
+        success: (r) => {
+          let apps = [];
+          try { apps = JSON.parse(r.responseText).apps || []; } catch (e) { /* keep [] */ }
+          const dep = apps.find((x) => x.kind === 'Deployment');
+          const any = dep || apps[0] || null;
+          resolve(any ? { k8sapp: `${any.namespace}/${any.name}`, kind: any.kind } : null);
+        },
+        failure: () => resolve(null),
+      });
+    }));
+    expect(target, 'apps.json available').toBeTruthy();
+
+    const created = await page.evaluate((preferId) => {
+      const items = PVE.data.ResourceStore.getData().items
+        .filter((r) => r.data.type === 'k8sapp');
+      const record = (preferId && items.find((r) => r.data.k8sapp === preferId)) || items[0];
       if (!record) return { ok: false, reason: 'no k8sapp record in ResourceStore' };
 
       const fakeRecord = { data: Ext.clone(record.data), isRoot: () => false };
@@ -136,7 +154,7 @@ test.describe('Kubernetes application context menu', () => {
         title: menu.title,
         recordStatus: fakeRecord.data.status,
       };
-    });
+    }, target.k8sapp);
     expect(created.ok, created.reason || 'menu created').toBe(true);
     expect(created.className).toBe('PVE.k8sapp.CmdMenu');
     expect(created.title).toMatch(/^K8s /);
@@ -173,7 +191,10 @@ test.describe('Kubernetes application context menu', () => {
       expect(state.items.start).toBe(true);
       expect(state.items.stop).toBe(false);
       expect(state.items.restart).toBe(false);
-      expect(state.items.scale).toBe(false);
+      // Deployment/StatefulSet can scale; a DaemonSet cannot (menu is right
+      // to disable it), so the expectation follows the workload kind.
+      const scalable = target.kind === 'Deployment' || target.kind === 'StatefulSet';
+      expect(state.items.scale).toBe(!scalable);
       expect(state.items.rollback).toBe(false);
       expect(state.items.pause).toBe(false);
       expect(state.items.resume).toBe(false);
@@ -255,14 +276,30 @@ test.describe('Kubernetes application context menu', () => {
   test('notes round-trip and k8s actions land in the PVE task/cluster logs', async ({ page }) => {
     const { csrf } = await login(page);
 
-    const app = await page.evaluate(() => {
-      const rec = PVE.data.ResourceStore.getData().items
-        .find((r) => r.data.type === 'k8sapp');
-      return rec ? {
-        node: rec.data.node,
-        appid: rec.data.k8sapp.replace('/', ':'),
-      } : null;
-    });
+    // The tree record carries the pseudo-host in `node` since the Kubernetes
+    // grouping change; the real API node travels in `k8snode`. Prefer a
+    // Deployment for the scale probe (kubectl cannot scale DaemonSets).
+    const app = await page.evaluate(() => new Promise((resolve) => {
+      const recs = PVE.data.ResourceStore.getData().items
+        .filter((r) => r.data.type === 'k8sapp');
+      if (!recs.length) return resolve(null);
+      const pick = (i) => {
+        if (i >= recs.length) {
+          const d = recs[0].data;
+          return resolve({ node: d.k8snode || d.node, appid: d.k8sapp.replace('/', ':') });
+        }
+        const d = recs[i].data;
+        const appid = d.k8sapp.replace('/', ':');
+        PVE.k8s.getApp(appid, (a) => {
+          if (a && a.kind === 'Deployment') {
+            resolve({ node: d.k8snode || d.node, appid });
+          } else {
+            pick(i + 1);
+          }
+        });
+      };
+      pick(0);
+    }));
     expect(app, 'k8sapp record present').toBeTruthy();
 
     // Current desired replica count (a no-op scale changes nothing).
@@ -362,7 +399,7 @@ test.describe('Kubernetes application context menu', () => {
     // calling getRange() before the range is cached throws in Ext.
     await page.getByText('Task History', { exact: true }).first().click();
     await expect(
-      page.locator('.x-grid-item', { hasText: 'kube-system-coredns' }).first(),
+      page.locator('.x-grid-item', { hasText: scopedId }).first(),
     ).toBeVisible({ timeout: 30000 });
     const taskTab = await page.evaluate(() => {
       const browser = Ext.ComponentQuery.query('pveK8sAppBrowser')[0];

@@ -1,7 +1,7 @@
 # sufficit-proxmox-kubernetes — Kubernetes na interface do Proxmox VE (POC)
 
-Integra o K3s que roda no host PVE à própria UI do Proxmox (validado no
-PVE 9.2.11, Debian 13). Consulta dos dados do
+Integra o K3s que roda no host PVE à própria UI do Proxmox (validado em
+hosts PVE 9.1.x e 9.2.x, Debian 12/13). Consulta dos dados do
 cluster + **ações declarativas** (`kubectl scale/rollout/delete pod`) no menu
 de contexto — sem expor kubeconfig, tokens, shell do host ou edição livre de
 YAML.
@@ -18,7 +18,17 @@ YAML.
 3. **Árvore de recursos (Server View e Folder View):** cada aplicação
    Kubernetes (`Deployment`/`StatefulSet`/`DaemonSet`/Pod solto) aparece como
    recurso `k8sapp` — mesma lista de VMs, LXCs e storages, ícone de navio,
-   aninhada sob o nó que executa o K3s. Clicar abre um painel que replica a interface do LXC: `Summary` (ícone `fa-book`, `StatusView` com barras, `Notes` Markdown e gráficos), `Console` (shell interativo no pod via termproxy/websocket, com seleção de pod/container, e logs somente leitura), `Resources` (containers), `Network` (Services), `DNS`, `Options` e `Task History` (somente as tasks PVE Start/Stop/Scale/Restart/Rollback/Pause/Resume/Delete pod desta aplicação), além de `K8s Events`, `Images` e `Volumes`. O histórico usa a mesma grade nativa do Proxmox, mas consulta `/nodes/{node}/k8sapp/{appid}/tasks`; não exibe tasks de outras aplicações, VMs, containers ou apenas do nó. O conteúdo vem da API própria `/nodes/{node}/k8sapp/{appid}` e do snapshot local, sem abrir shell do host.
+   agrupado sob o **pseudo-host “Kubernetes”** no nível do datacenter (Server
+   View), igual a um servidor PVE: o cluster inteiro num único lugar, sem vínculo
+   com o host que publica o snapshot. Clicar no pseudo-host abre o
+   `pveK8sClusterBrowser` (visão cluster-wide, somente leitura, com todas as
+   aplicações e o resumo do nó); as ações continuam no menu/contexto de cada app.
+   O nó real que serve a API (`/nodes/{node}/k8sapp`, kubectl local) viaja no
+   campo `k8snode` do registro da árvore; os nós reais de cada workload aparecem
+   na coluna Nodes do painel do pseudo-host e na coluna NODE dos pods da app. O pseudo-host não recebe menu de contexto
+   de nó PVE nem console (guardas no dispatcher e no `openTreeConsole`).
+   Clicar numa aplicação abre um painel que replica a interface do LXC: `Summary` (ícone `fa-book`, `StatusView` com barras, `Notes` Markdown e gráficos), `Console` (shell interativo no pod via termproxy/websocket, com seleção de pod/container, e logs somente leitura), `Resources` (containers), `Network` (Services), `DNS`, `Options` e `Task History` (somente as tasks PVE Start/Stop/Scale/Restart/Rollback/Pause/Resume/Delete pod desta aplicação), além de `K8s Events`, `Images` e `Volumes`. O histórico usa a mesma grade nativa do Proxmox, mas consulta `/nodes/{node}/k8sapp/{appid}/tasks`; não exibe tasks de outras aplicações, VMs, containers ou apenas do nó. O conteúdo vem da API própria `/nodes/{node}/k8sapp/{appid}` e do snapshot local, sem abrir shell do host.
+
 **Notas e logs integrados:** as notas das aplicações são persistidas em `/var/lib/pve-manager/k8s/notes.json` (diretório de estado do próprio `pve-manager`, ao lado de `jobs/` e `pkgupdates/` — não em `/usr/share`, que é asset estático do pacote). Cada mutação de nota registra `k8sapp update notes <appid>` no cluster log. As ações Start/Stop/Scale/Restart/Rollback/Pause/Resume/Delete pod retornam um UPID PVE real (`fork_worker`), gravam a saída em `/var/log/pve/tasks` e aparecem em `Cluster → Tasks`, `Cluster → Log` e no `Task History` do nó.
 
 **Task History por aplicação:** o UPID de cada ação carrega a identidade da app no campo `id` (`kube-system-coredns`), e o endpoint `/nodes/{node}/k8sapp/{appid}/tasks` lê os mesmos arquivos de task do PVE (`/var/log/pve/tasks/index`, `index.1` e a lista `active`) devolvendo **apenas** as tasks `k8s*` daquela aplicação. A aba do painel é a grade nativa `proxmoxNodeTasks` apontada para esse endpoint (com `preFilter: { source: 'all' }`, que inclui a task ainda em execução), preservando colunas, `Task Viewer`, download de log, paginação (`start`/`limit` + total) e os filtros de usuário/tipo/status/data. O endpoint nativo do nó só sabe filtrar por VMID — daí a rota dedicada.
@@ -58,9 +68,9 @@ automaticamente. Nenhuma alteração foi aplicada ao K3s durante a instalação
 desta aba.
 
 A configuração SDN nativa continua sendo administrada nas telas próprias do
-Proxmox. A VNet de teste encontrada no host permanece separada do K3s:
-`k8s` → `vnk8s` → `172.20.10.0/24`, fora das redes `172.16.0.0/16` e
-`172.19.0.0/16`.
+Proxmox. Mantenha as VNets SDN fora das faixas usadas pelo Kubernetes
+(`cluster-cidr`/`service-cidr` e as bridges de nó) — a aba Network destaca
+qualquer conflito entre elas.
 
 ## Modelo de recursos
 
@@ -68,8 +78,10 @@ O K3s roda **direto no host** (decisão do projeto; sem VM/LXC dedicada). A
 reserva de recursos continua lógica, dentro do Kubernetes
 (`requests`/`limits` por container) — a integração não cria recurso PVE
 fictício nem transforma Pod em VM. O que sobe para a árvore são as
-**aplicações**, com `node=<host>` e `status` (`ok`/`degraded`) calculado a
-partir das réplicas.
+**aplicações**, com `node='Kubernetes'` (pseudo-host do agrupamento),
+`k8snode` = nó real que serve a API e `status` (`ok`/`degraded`) calculado a
+partir das réplicas. A Server View agrupa tudo sob `Datacenter → Kubernetes`;
+a Folder View continua agrupando por tipo em “Kubernetes Applications”.
 
 | Arquivo | Papel |
 |---|---|
@@ -78,18 +90,19 @@ partir das réplicas.
 | `app-browser.js` | widget `pveK8sAppBrowser` + `PVE.k8sapp.CmdMenu` — painel e menu de contexto da aplicação; janelas de escala, logs, describe e exclusão de pod |
 | `index.html` | painel da aba do nó, servido em `/pve2/js/k8s/index.html` |
 | `manage.sh` | `verify` (checagem completa, inclui a guarda do dispatcher e as 10 rotas de ação) e `uninstall` (rollback da UI) |
-| `tests/` | suíte Playwright do menu, ações e reativação do Summary (login real, clique direito na árvore, dispatcher, estado dos 13 itens e navegação entre abas) — ver `tests/README.md` |
+| `tests/` | suíte Playwright: menu de contexto e ações, pseudo-host Kubernetes, pods aninhados por host (`k8spod`) e reativação do Summary (login real, clique direito na árvore, dispatcher, estado dos 13 itens e navegação entre abas) — ver `tests/README.md` |
 
 ## Instalação (host PVE com k3s ativo)
 
 ```bash
-python3 /root/k8s-ui/patch_ui.py          # aplica/reaplica patches
-mkdir -p /usr/share/pve-manager/js/k8s    # painel + status.json aqui
-systemctl restart pveproxy                # OBRIGATÓRIO: pveproxy mapeia
-                                          # subdiretórios novos só no boot
+python3 /root/k8s-ui/patch_ui.py          # aplica/reaplica patches, cria o
+                                          # painel, instala cron + guard e
+                                          # reinicia pvedaemon/pveproxy
+bash /root/k8s-ui/manage.sh verify        # tudo verde?
 ```
 
-Cron (root): `* * * * * /usr/local/sbin/gen-k8s-status.py >/dev/null 2>&1`
+O cron do `gen-k8s-status.py` (publica `apps.json`/`status.json` a cada
+minuto) é instalado pelo próprio patcher — sem passo manual.
 
 ## Verificação e rollback
 
@@ -129,6 +142,13 @@ Manual: `k8s-ui-guard -v` (mostra saída; sempre loga).
   falhar (anchors mudaram no PVE novo), a UI volta ao estado nativo e o
   reparo manual é `python3 $K8SUI_DIR/patch_ui.py`.
   Os backups `.bak-k8spoc` são da versão 9.2.11 — não restaurar em outra.
+- **Hosts-fantasma (v4/v5):** pods de nós que existem NESTE PVE (`%pve_nodes`
+  a partir de `get_nodelist`) sobem com `node=<host real>` e aninham na Server
+  View; pods de nós gerenciados por OUTROS PVEs sobem com `node='Kubernetes'`.
+  Nenhum host sintético (ex.: VMs desativadas do cluster) é materializado —
+  nem com JS antigo em cache (registros remotos agrupam no pseudo-host já
+  existente). O filtro da Server View esconde os pods remotos;
+  a Folder View mostra o cluster inteiro na pasta "Kubernetes Pods".
 - **Cache:** `patch_ui.py` acrescenta `k8spoc=<hash-do-código>` aos dois
   scripts da UI. Assim, após reaplicar, o navegador baixa automaticamente o
   dispatcher e o `PVE.k8sapp.CmdMenu` novos; Ctrl+F5 continua sendo útil para
@@ -146,3 +166,56 @@ Manual: `k8s-ui-guard -v` (mostra saída; sempre loga).
 - Este modelo de integração serve para o modo HOST (lab/edge). Para
   produção, o produto final deve usar endpoint dedicado na API do PVE e
   clusters em VMs.
+
+## Pods aninhados por host (tipo k8spod)
+
+Cada pod do snapshot sobe em `/cluster/resources` como recurso `k8spod` com
+`node=<host onde o pod roda>`:
+
+- **Server View**: os pods aparecem DENTRO do host real correspondente (o
+  filtro da view só deixa passar pods cujo host existe nesta instalação —
+  no host local, os pods do próprio host). Pods de outros PVEs ficam fora.
+- **Folder View**: pasta "Kubernetes Pods" com o cluster INTEIRO (inclui os
+  pods de outros PVEs — publicados com node='Kubernetes', sem nunca
+  materializar host-fantasma na Server View).
+- Clique no pod: painel `pveK8sPodPanel` (resumo + Console do próprio pod).
+- Botão direito no pod: Console / Pod logs / Describe pod / View YAML /
+  Delete pod (a validação de permissão do pod é a mesma do app).
+- `describe?pod=<nome>` restringe o kubectl ao pod (validado contra o snapshot).
+
+Não há rotas novas: tudo reusa os endpoints `/nodes/{node}/k8sapp/...`, com o
+nó real viajando no campo `k8snode` do registro do pod.
+
+## Instalação em outros hosts PVE do cluster k8s
+
+A mesma integração roda em **cada host PVE que participa do K3s** — cada UI
+mostra o cluster inteiro (apps + pods de todos os nós), com os pods locais
+aninhados sob o próprio host. Já validado em hosts PVE 9.1.x e 9.2.x a
+partir do mesmo repositório:
+
+```bash
+# 1. copie o repo para o host alvo (scp/git) e, na ORIGEM:
+ssh root@<origem> 'tar czf - -C /root k8s-ui --exclude="*/backup-*"' > k8s-ui.tar.gz
+scp -P <porta> k8s-ui.tar.gz root@<alvo>:/root/
+# 2. no alvo:
+cd /root && tar xzf k8s-ui.tar.gz
+python3 /root/k8s-ui/patch_ui.py --dry-run   # pre-valida TODAS as ancoras sem alterar nada
+python3 /root/k8s-ui/patch_ui.py             # aplica
+bash /root/k8s-ui/manage.sh verify           # TUDO OK
+```
+
+Notas:
+
+- `--dry-run` roda o patcher inteiro sobre um overlay em memória: escritas,
+  cron, systemctl e installs viram no-ops e nada toca o disco. Serve para
+  pré-validar em versões de PVE ainda não testadas antes de aplicar.
+- O patcher aceita âncoras variantes por versão (já cobre 9.1.x e 9.2.x):
+  se uma âncora não casa, ele tenta a variante seguinte e aborta sem
+  alterar caso nenhuma case exatamente 1x.
+- O cron do `gen-k8s-status.py` agora é instalado pelo próprio patcher
+  (instalações anteriores o tinham criado à mão — é o que publica
+  apps.json/status.json/history.json a cada minuto).
+- `manage.sh verify` trata `docker` como opcional (hosts sem Docker).
+- Suite E2E: `PVE_URL`/`PVE_USER`/`PVE_PASSWORD`/`PVE_HOST` apontam para o
+  host alvo; os testes não dependem mais de nomes fixos de pods/apps nem
+  assumem cluster PVE de nó único.

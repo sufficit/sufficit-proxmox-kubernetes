@@ -1,14 +1,58 @@
-# Testes do menu de contexto (Playwright)
+# Testes E2E (Playwright)
 
 `context-menu.spec.js` roda contra a **UI real** do Proxmox: faz
 login, espera o `ResourceStore` receber os recursos `k8sapp`, clica com o
 botão direito numa app da árvore e valida o menu completo. O segundo teste
 invoca o dispatcher `PVE.Utils.createCmdMenu` com um registro sintético e
 confere classe, título, os 13 itens e o estado habilitado/desabilitado
-refinado a partir do `apps.json`. Também verifica que o painel Summary mantém
-as notas na linha superior, ao lado do StatusView, como no Summary do LXC —
-sem inserir uma descrição intermediária entre Notes e os demais cards.
-Também há um teste de feedback que simula o início/fim de uma ação sem executar `kubectl`: verifica o mapeamento para o estado final, a classe `k8s-pending` e a remoção do spinner. O quarto teste valida a consolidação com o Proxmox pela API real: round-trip das notas (PUT protegido → pvedaemon/root; GET → pveproxy/www-data; era o caminho que falhava com "Permission denied 500"), uma ação `scale` no-op que precisa retornar um UPID `k8sscale`, aparecer com status `OK` no histórico de tarefas do nó e ser registrada no cluster log (`starting task ...`). Também confere que `/nodes/{node}/k8sapp/{appid}/tasks` — o endpoint dedicado por aplicação — devolve a task recém-criada e **somente** tasks `k8s*` com o `id` desta app (nenhuma linha de outro app, VM, container ou tarefa do nó), e que a aba `Task History` do painel é a grade nativa `proxmoxNodeTasks` apontando para essa rota (`preFilter: { source: 'all' }`), não para `/nodes/{node}/tasks`. A única mutação é um `scale` para o mesmo número de réplicas atuais (no-op) e as notas são restauradas ao valor original.
+refinado a partir do `apps.json`. A app alvo é escolhida de `apps.json`
+priorizando um `Deployment` — DaemonSet não é escalável e o menu
+(corretamente) desabilita `Scale`; a expectativa segue o kind do workload.
+Também verifica que o painel Summary mantém as notas na linha superior, ao
+lado do StatusView, como no Summary do LXC — sem inserir uma descrição
+intermediária entre Notes e os demais cards. Há ainda um teste de feedback
+que simula o início/fim de uma ação sem executar `kubectl`: verifica o
+mapeamento para o estado final, a classe `k8s-pending` e a remoção do
+spinner. O teste de consolidação valida o round-trip das notas pela API
+real (PUT protegido → pvedaemon/root; GET → pveproxy/www-data; era o
+caminho que falhava com "Permission denied 500"), uma ação `scale` no-op
+que precisa retornar um UPID `k8sscale`, aparecer com status `OK` no
+histórico de tarefas do nó e ser registrada no cluster log, e que
+`/nodes/{node}/k8sapp/{appid}/tasks` — o endpoint dedicado por aplicação —
+devolva a task recém-criada e **somente** tasks `k8s*` com o `id` desta app.
+A única mutação é um `scale` para o mesmo número de réplicas atuais (no-op)
+e as notas são restauradas ao valor original.
+
+## Testes do pseudo-host (pseudo-host.spec.js)
+
+`pseudo-host.spec.js` valida o agrupamento das apps sob o pseudo-host
+**Kubernetes** na Server View: todo registro `k8sapp` carrega
+`node='Kubernetes'` (agrupamento) e `k8snode` (o nó real que serve a API);
+clicar no pseudo-host abre o `pveK8sClusterBrowser` com o resumo alimentado
+por `status.json` (o host publicador aparece no Summary) e a grade
+Applications listando todas as apps de `apps.json`; o pseudo-host não
+recebe menu de contexto de nó PVE (nenhum Shutdown/Reboot/Shell); e o
+painel da app resolve o nó real pela API (`on node '<k8snode>'`).
+
+## Testes dos pods aninhados por host (pods-in-tree.spec.js)
+
+`pods-in-tree.spec.js` valida o recurso `k8spod`: cada pod do snapshot sobe
+com o host onde roda. Na **Server View** os pods aninham DENTRO do host real
+— o filtro da view esconde pods de hosts fora deste PVE (em cluster PVE
+multi-nó, cada host com o patch publica seus pods locais sob o próprio
+hostname) e nenhum host-fantasma é materializado; na **Folder View** a pasta
+"Kubernetes Pods" carrega o cluster inteiro (inclusive os pods publicados
+com `node='Kubernetes'`). Clicar num pod abre o `pveK8sPodPanel` com o
+resumo (Application/Pod/Node/Status) e o menu de contexto oferece Console /
+Pod logs / Describe pod / View YAML / Delete pod — nunca Shutdown/Shell de
+nó. Os testes não dependem de nomes fixos de pods/apps nem assumem cluster
+PVE de nó único.
+
+Notas de infraestrutura da suíte: a árvore lateral usa buffered rendering
+do ExtJS (só as linhas visíveis existem no DOM) — os testes usam viewport
+alto e rolam o nó para a view antes de interagir; o `expandAll` repete até
+o grupo estar aberto no DOM porque o `updateTree` recria grupos colapsados
+a cada poll do `ResourceStore`.
 
 ## Testes do Summary (summary-reactivation.spec.js)
 
@@ -32,10 +76,17 @@ npm install
 PVE_URL=https://pve.example.com:8006/ \
 PVE_USER='k8s-test@pve' \
 PVE_PASSWORD='...' \
+PVE_HOST=pve02 \
 npx playwright test -c playwright.config.js
 ```
 
-Sem `PVE_PASSWORD` a suite é pulada com aviso (nada de credencial em arquivo).
+Sem `PVE_PASSWORD` a suite é pulada com aviso (nada de credencial em
+arquivo). `pods-in-tree.spec.js` e `pseudo-host.spec.js` exigem também
+`PVE_HOST`: o nome do nó PVE alvo (o mesmo que aparece em
+`/api2/json/nodes`), que publica o snapshot local e deve receber seus pods
+aninhados. Para cobrir todos os hosts do cluster, rode a suite uma vez por
+host trocando `PVE_URL`/`PVE_HOST`. Certificados autoassinados são aceitos
+(`ignoreHTTPSErrors`) — `PVE_URL` pode apontar direto para o IP.
 
 ## Usuário de teste
 
@@ -56,7 +107,15 @@ capacidades que o menu consulta. A senha é sorteada a cada `create`.
 
 ## Arquivos
 
-- `context-menu.spec.js` — os dois testes de navegador.
+- `context-menu.spec.js` — menu de contexto, dispatcher, feedback de ações
+  e consolidação com a API real do Proxmox.
+- `pseudo-host.spec.js` — agrupamento sob o pseudo-host Kubernetes e
+  cluster browser.
+- `pods-in-tree.spec.js` — pods (`k8spod`) aninhados por host, painel do
+  pod e Folder View.
+- `summary-reactivation.spec.js` — reativação do card Summary após troca
+  de aba.
+- `dc-network.spec.js` — aba Datacenter → Kubernetes → Network.
 - `playwright.config.js` — 1 worker, HTTPS autoassinado aceito, `baseURL`
   de `PVE_URL`.
 - `pve-test-user.sh` — ciclo de vida do usuário de teste (roda no host).
