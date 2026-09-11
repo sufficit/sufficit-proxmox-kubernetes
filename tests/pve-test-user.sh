@@ -8,6 +8,11 @@
 # O usuario recebe apenas Sys.Audit + Sys.Modify + Sys.Console em "/",
 # exatamente as capacidades que o menu de contexto k8sapp consulta.
 # Nao ha senha fixa: e sorteada a cada create e impressa uma unica vez.
+#
+# ATENCAO (cluster PVE): user.cfg/acl.cfg sao compartilhados por todos os
+# nos do cluster via pmxcfs -- create/remove afetam o CLUSTER inteiro, e a
+# role abaixo NAO deve ser a mesma usada por outros usuarios permanentes
+# (por isso o usuario persistente do CI usa a role K8sE2eRole, dedicada).
 set -euo pipefail
 
 USER_ID="k8s-test@pve"
