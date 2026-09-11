@@ -80,8 +80,15 @@ test.describe('Kubernetes pseudo-host grouping', () => {
     // panels), not as a tab bar.
     const appsTab = page.locator('.x-treelist-item-text').filter({ hasText: 'Applications' }).first();
     await appsTab.click();
+    // The Applications grid loads apps.json through a store proxy: the
+    // component can exist while the request is still in flight (store at 0),
+    // which is common from high-latency runners. Wait for data, not just
+    // for the component.
     await page.waitForFunction(
-      () => !!Ext.ComponentQuery.query('pveK8sClusterBrowser #apps')[0],
+      () => {
+        const grid = Ext.ComponentQuery.query('pveK8sClusterBrowser #apps')[0];
+        return grid && grid.getStore().getCount() > 0;
+      },
       null, { timeout: 30000 },
     );
     const apps = await page.evaluate(() => {
