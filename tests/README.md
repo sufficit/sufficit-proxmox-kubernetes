@@ -113,15 +113,19 @@ Cada entrada da matrix resolve seus secrets pelo `slot`:
 `PVE_URL_<slot>` e `PVE_HOST_<slot>`.
 
 O usuario `k8s-e2e@pve` e **persistente** (a suite noturna roda sem
-ninguem para cria-lo) e usa o mesmo papel restrito do
-`pve-test-user.sh` (`Sys.Audit` + `Sys.Modify` + `Sys.Console` em `/`).
-Crie-o em cada host da matrix:
+ninguem para cria-lo), com o mesmo perfil restrito (`Sys.Audit` +
+`Sys.Modify` + `Sys.Console` em `/`) mas em role **propria**
+(`K8sE2eRole`), distinta da `K8sTestRole` do usuario temporario: em
+cluster PVE, `user.cfg`/`acl.cfg` sao compartilhados por todos os nos
+via pmxcfs -- `pve-test-user.sh remove` em qualquer no do cluster apaga
+a role e, com ela, as permissoes do CI no cluster inteiro. Crie a role
+uma vez por cluster (e uma vez em cada host standalone):
 
 ```bash
-pveum role add K8sTestRole -privs 'Sys.Audit Sys.Modify Sys.Console' 2>/dev/null || true
+pveum role add K8sE2eRole -privs 'Sys.Audit Sys.Modify Sys.Console' 2>/dev/null || true
 pveum user add k8s-e2e@pve --password '<senha do secret>' \
   --comment 'CI E2E noturno - GitHub Actions'
-pveum aclmod / -users k8s-e2e@pve -roles K8sTestRole
+pveum aclmod / -users k8s-e2e@pve -roles K8sE2eRole
 ```
 
 Sem `E2E_HOSTS_JSON` o job e pulado (o CI estatico de push nao depende
