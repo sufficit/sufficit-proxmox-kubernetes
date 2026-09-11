@@ -108,8 +108,29 @@ minuto) é instalado pelo próprio patcher — sem passo manual.
 
 ```bash
 bash /root/k8s-ui/manage.sh verify      # tudo verde?
+bash /root/k8s-ui/manage.sh update      # atualiza o deploy a partir da última release
 bash /root/k8s-ui/manage.sh uninstall   # restaura originais, remove painel/cron/gerador
 ```
+
+## Atualização a partir do repositório
+
+`manage.sh update` (delega ao `host-update.sh`) troca o deploy do host pela
+versão publicada no GitHub e **nunca deixa o host quebrado**:
+
+1. baixa o tarball da **última release** (fallback: branch `main`) para um
+   diretório novo em `/root/k8sui-update.*`;
+2. preserva o que é do host — `tests-local/`, `backup-*/`, `*.kubeconfig`,
+   `tests/node_modules`;
+3. grava `.version` (release + hora UTC; o `verify` mostra essa versão);
+4. troca os diretórios com um `mv` atômico, reexecuta `patch_ui.py` e roda
+   `manage.sh verify`;
+5. se o verify falhar, restaura o deploy anterior automaticamente
+   (o anterior fica em `/root/k8s-ui.old-<timestamp>`; a tentativa que
+   falhou fica em `/root/k8s-ui.failed-<timestamp>`).
+
+Opções de ref: `--tag v1.0.0`, `--branch main`, `--tarball repo.tar.gz`
+(offline). Não usa `git` no host — só `curl` + `tar`, o que já existe em
+qualquer PVE.
 
 `uninstall` NÃO remove o K3s (`/usr/local/bin/k3s-uninstall.sh` faz isso).
 
@@ -126,6 +147,15 @@ guard isso é **automático**:
   `python3 $K8SUI_DIR/patch_ui.py` (idempotente — reaplica patches, reinstala
   os arquivos nossos e reinicia `pvedaemon`/`pveproxy` se necessário) e roda
   `manage.sh verify` como health-check (uma retry de 10 s).
+- **Falha visível:** se o reparo não passar no verify, o guard grava um
+  alerta persistente (`/var/lib/pve-manager/k8s/alert-state`) que faz o
+  `manage.sh verify` reportar FALHA em toda execução até o problema ser
+  resolvido — a falha nunca fica só no log. Um e-mail sai na primeira
+  falha (sem repetição) se houver relay externo configurado no postfix
+  (`relayhost` em `/etc/postfix/main.cf`) e destinatário em
+  `/etc/k8s-ui-guard-notify` (ou var `K8SUI_NOTIFY_MAIL`); sem relay o
+  envio direto é recusado pelo Gmail (IPs sem PTR/autenticação), então o
+  alerta fica apenas no estado persistente + log.
 - O hook do apt nunca bloqueia nem falha a transação (`|| true`); qualquer
   falha fica em `/var/log/k8s-ui-guard.log` e a UI volta ao estado nativo.
 - A pasta do deploy fica em `/var/lib/pve-manager/k8s/guard-src-dir`

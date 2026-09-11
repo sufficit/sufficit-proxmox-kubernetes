@@ -1,6 +1,8 @@
 #!/bin/bash
 # manage.sh — verificação e rollback da integração K3s <-> UI do Proxmox (POC)
 # Uso: bash manage.sh verify   (checagem completa)
+#      bash manage.sh update    (baixa a última release do GitHub e reaplica;
+#                                rollback automático se o verify falhar)
 #      bash manage.sh uninstall (remove SÓ a integração da UI; o K3s continua ativo)
 # Rollback restaurável apenas na mesma versão do PVE dos backups (9.2.11).
 set -u
@@ -19,12 +21,25 @@ K8S_STATE_DIR=/var/lib/pve-manager/k8s
 GEN=/usr/local/sbin/gen-k8s-status.py
 FQDN=$(hostname -f)
 SHORT=$(hostname)
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 
 ok()   { printf "  [OK]   %s\n" "$1"; }
 fail() { printf "  [FAIL] %s\n" "$1"; RC=1; }
 RC=0
 
 verify() {
+  echo "== Versao / Alertas =="
+  if [ -f "$SELF_DIR/.version" ]; then
+    ok "versao do deploy: $(head -n1 "$SELF_DIR/.version")"
+  else
+    ok "versao do deploy: desconhecida (anterior ao host-update.sh; rode: bash manage.sh update)"
+  fi
+  if [ -f "$K8S_STATE_DIR/alert-state" ]; then
+    fail "guard com alerta pendente desde $(date -d @"$(cat "$K8S_STATE_DIR/alert-state" 2>/dev/null || echo 0)" '+%F %T' 2>/dev/null) -- ver /var/log/k8s-ui-guard.log"
+  else
+    ok "nenhum alerta pendente do guard"
+  fi
+
   echo "== Patches =="
   grep -q "^    'k3s',$" "$SERVICES_PM" && ok "k3s listado em Services.pm" || fail "k3s ausente em Services.pm"
   grep -q "POC k8s (k8s-poc)" "$CLUSTER_PM" && ok "Cluster.pm injeta k8sapp em /cluster/resources" || fail "Cluster.pm sem patch k8sapp"
@@ -210,6 +225,16 @@ uninstall() {
 
 case "${1:-verify}" in
   verify) verify ;;
+  update)
+    # atualiza o deploy a partir do repositorio (tarball do GitHub) e
+    # reaplica tudo; rollback automatico se o verify falhar.
+    UPDATER="$SELF_DIR/host-update.sh"
+    if [ ! -f "$UPDATER" ]; then
+      echo "update: $UPDATER nao encontrado" >&2
+      exit 2
+    fi
+    exec bash "$UPDATER" "${@:2}"
+    ;;
   uninstall) uninstall ;;
-  *) echo "uso: $0 {verify|uninstall}"; exit 2 ;;
+  *) echo "uso: $0 {verify|update|uninstall}"; exit 2 ;;
 esac

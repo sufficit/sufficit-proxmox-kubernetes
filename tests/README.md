@@ -88,6 +88,39 @@ aninhados. Para cobrir todos os hosts do cluster, rode a suite uma vez por
 host trocando `PVE_URL`/`PVE_HOST`. Certificados autoassinados são aceitos
 (`ignoreHTTPSErrors`) — `PVE_URL` pode apontar direto para o IP.
 
+## E2E noturno (GitHub Actions)
+
+`.github/workflows/e2e-nightly.yml` roda a suite completa todos os dias
+(02:30 UTC) contra cada host da matrix, direto do GitHub — um upgrade do
+PVE que quebrar as ancoras da UI e descoberto no dia, nao quando alguem
+abre a tela. Falhas enviam e-mail ao dono do repositorio pelo proprio
+GitHub Actions e sobem os traces como artefatos (7 dias).
+
+Configuracao (uma vez, admin do repo):
+
+```bash
+# hosts da matrix (hostnames publicos ficam FORA do codigo publico):
+gh variable set E2E_HOSTS_JSON \
+  --body '[{"name":"eveo","url":"https://<host-eveo>:8006/","node":"<no-pve>"}]'
+gh secret set PVE_E2E_USER   --body 'k8s-e2e@pve'
+gh secret set PVE_E2E_PASSWORD --body '<senha do k8s-e2e>'
+```
+
+O usuario `k8s-e2e@pve` e **persistente** (a suite noturna roda sem
+ninguem para cria-lo) e usa o mesmo papel restrito do
+`pve-test-user.sh` (`Sys.Audit` + `Sys.Modify` + `Sys.Console` em `/`).
+Crie-o em cada host da matrix:
+
+```bash
+pveum role add K8sTestRole -privs 'Sys.Audit Sys.Modify Sys.Console' 2>/dev/null || true
+pveum user add k8s-e2e@pve --password '<senha do secret>' \
+  --comment 'CI E2E noturno - GitHub Actions'
+pveum aclmod / -users k8s-e2e@pve -roles K8sTestRole
+```
+
+Sem `E2E_HOSTS_JSON` o job e pulado (o CI estatico de push nao depende
+de host real).
+
 ## Usuário de teste
 
 O login do teste usa `/access/ticket` com `username` já contendo o realm

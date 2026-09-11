@@ -27,6 +27,46 @@ VERBOSE=0
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
 say() { [ $VERBOSE -eq 1 ] && printf '%s\n' "$*"; log "$*"; }
 
+# ---- alerta de falha ----
+# Estado persistente: manage.sh verify FALHA enquanto houver alerta pendente,
+# para que a falha nao passe despercebida (o guard roda desatendido). Um
+# e-mail so sai se o postfix tiver relay externo configurado (relayhost):
+# sem relay o Gmail recusa mensagens destes IPs (sem PTR/autenticacao),
+# entao nao tentamos enviar e a falha fica visivel pelo verify/log.
+NOTIFY_STATE=$STATE_DIR/alert-state
+NOTIFY_MAIL=${K8SUI_NOTIFY_MAIL:-}
+[ -r /etc/k8s-ui-guard-notify ] && NOTIFY_MAIL=$(head -n1 /etc/k8s-ui-guard-notify)
+
+alert() {
+  local was_pending=0
+  [ -f "$NOTIFY_STATE" ] && was_pending=1
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  date +%s > "$NOTIFY_STATE"
+  if [ "$was_pending" -eq 1 ]; then
+    log "ALERTA persistente: $*"
+    return 0
+  fi
+  log "ALERTA: $*"
+  if [ -n "$NOTIFY_MAIL" ] && grep -qE '^[[:space:]]*relayhost[[:space:]]*=' /etc/postfix/main.cf 2>/dev/null; then
+    if printf 'Subject: [k8s-ui-guard] %s: falha no reparo da UI\n\nHost: %s\nHora: %s\nDetalhe: %s\nLog: %s\n' \
+        "$(hostname -f)" "$(hostname -f)" "$(date)" "$*" "$LOG" \
+        | sendmail "$NOTIFY_MAIL" 2>/dev/null; then
+      log "alerta enviado por e-mail para $NOTIFY_MAIL"
+    else
+      log "envio do e-mail de alerta falhou (ver mailq)"
+    fi
+  else
+    log "e-mail de alerta desativado (sem relayhost no postfix ou NOTIFY_MAIL vazio)"
+  fi
+}
+
+recovered() {
+  if [ -f "$NOTIFY_STATE" ]; then
+    rm -f "$NOTIFY_STATE"
+    say "falha anterior recuperada -- alerta encerrado"
+  fi
+}
+
 if [ -z "${K8SUI_DIR:-}" ] && [ -r "$STATE_DIR/guard-src-dir" ]; then
   K8SUI_DIR=$(head -n1 "$STATE_DIR/guard-src-dir")
 fi
@@ -57,11 +97,13 @@ flock -n 9 || { say "outra instancia ativa; saindo"; exit 0; }
 
 if intact; then
   say "integridade OK (nenhuma acao)"
+  recovered
   exit 0
 fi
 
 say "patches ausentes/sobrescritos -> reexecutando patch_ui.py"
 if [ ! -f "$K8SUI_DIR/patch_ui.py" ]; then
+  alert "$K8SUI_DIR/patch_ui.py nao encontrado; nada reparado"
   say "ERRO: $K8SUI_DIR/patch_ui.py nao encontrado; nada reparado"
   exit 1
 fi
@@ -69,6 +111,7 @@ out=$(timeout 300 python3 "$K8SUI_DIR/patch_ui.py" 2>&1)
 rc=$?
 printf '%s\n' "$out" >> "$LOG"
 if [ $rc -ne 0 ]; then
+  alert "patch_ui.py falhou (rc=$rc); anchors podem ter mudado no upgrade"
   say "ERRO: patch_ui.py falhou (rc=$rc); anchors podem ter mudado no upgrade"
   exit $rc
 fi
@@ -86,5 +129,6 @@ for attempt in 1 2; do
   fi
   [ $attempt -eq 1 ] && { say "verify nao passou (tentativa 1); nova tentativa em 10s"; sleep 10; }
 done
+alert "verify nao passou apos reparo (detalhes no log)"
 say "ERRO: verify nao passou apos reparo (detalhes no log)"
 exit 1

@@ -1,0 +1,65 @@
+name: E2E noturno
+
+on:
+  schedule:
+    - cron: "30 2 * * *" # 02:30 UTC (23:30 BRT)
+  workflow_dispatch:
+    inputs:
+      hosts:
+        description: "Rodar apenas nestes hosts (nomes separados por virgula; vazio = todos)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Playwright (${{ matrix.host.name }})
+    if: vars.E2E_HOSTS_JSON != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        host: ${{ fromJSON(vars.E2E_HOSTS_JSON) }}
+    env:
+      PVE_URL: ${{ matrix.host.url }}
+      PVE_HOST: ${{ matrix.host.node }}
+      PVE_USER: ${{ secrets.PVE_E2E_USER }}
+      PVE_PASSWORD: ${{ secrets.PVE_E2E_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Node + dependencias
+        working-directory: tests
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Validar secrets
+        run: |
+          if [ -z "$PVE_USER" ] || [ -z "$PVE_PASSWORD" ]; then
+            echo "::error::Configure os secrets PVE_E2E_USER e PVE_E2E_PASSWORD do repositorio."
+            exit 1
+          fi
+
+      - name: Suite E2E contra o PVE real (${{ matrix.host.name }})
+        working-directory: tests
+        run: |
+          if [ -n "${{ github.event.inputs.hosts }}" ] \
+             && ! printf '%s' "${{ github.event.inputs.hosts }}" | tr ',' '\n' | grep -qx "${{ matrix.host.name }}"; then
+            echo "pulando ${{ matrix.host.name }} (fora da selecao manual)"
+            exit 0
+          fi
+          npx playwright test -c playwright.config.js
+
+      - name: Artefatos em caso de falha
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: traces-${{ matrix.host.name }}
+          path: tests/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
