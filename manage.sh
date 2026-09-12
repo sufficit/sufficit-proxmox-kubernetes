@@ -126,13 +126,38 @@ verify() {
 
   echo "== API k8sapp =="
   TOK=""; AUTH=""
-  # Token efemero com nome UNICO por execucao: em cluster PVE o user.cfg e
-  # compartilhado (pmxcfs); dois verifies simultaneos (ou um run interrompido)
-  # deixam o token de nome fixo para tras -> "already exists" -> falso-negativo
-  # e rollback indevido. Pre-clean garante idempotencia.
+  # Token efemero com nome UNICO por execucao (o user.cfg e compartilhado no
+  # cluster via pmxcfs). Alem do nome unico (v1.0.2), aqui:
+  #  - pre-clean da FAMILIA k8sui-verify-*: runs interrompidos de outros PIDs
+  #    deixavam orfaos permanentes (token root privsep=0 acumulando no user.cfg)
+  #  - todo pveum sob `timeout`: com o pmxcfs travado o pveum pendura para
+  #    sempre e congela o verify/guard/host-update no meio da troca
+  #  - trap EXIT/INT/TERM remove o token mesmo se o script morrer no caminho
+  K8SUI_TOK_CLEANUP() {
+    [ -n "${TOKNAME:-}" ] || return 0
+    timeout 30 pveum user token remove root@pam "$TOKNAME" >/dev/null 2>&1 || true
+    TOKNAME=""
+  }
+  trap K8SUI_TOK_CLEANUP EXIT
+  trap 'K8SUI_TOK_CLEANUP; exit 130' INT TERM
+  timeout 30 pveum user token remove root@pam k8sui-verify >/dev/null 2>&1 || true
+  _orphans=$(timeout 30 pveum user token list root@pam --output-format json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    for t in json.load(sys.stdin):
+        tid = str(t.get("tokenid", ""))
+        if tid.startswith("k8sui-verify"):
+            print(tid)
+except Exception:
+    pass
+' 2>/dev/null || true)
+  while IFS= read -r _t; do
+    [ -n "$_t" ] || continue
+    timeout 30 pveum user token remove root@pam "$_t" >/dev/null 2>&1 || true
+  done <<<"$_orphans"
+  unset _t _orphans
   TOKNAME="k8sui-verify-$$"
-  pveum user token remove root@pam "$TOKNAME" >/dev/null 2>&1 || true
-  TOK=$(pveum user token add root@pam "$TOKNAME" --privsep 0 --output-format json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' 2>/dev/null || true)
+  TOK=$(timeout 30 pveum user token add root@pam "$TOKNAME" --privsep 0 --output-format json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' 2>/dev/null || true)
   if [ -n "$TOK" ]; then
     AUTH="PVEAPIToken=root@pam!$TOKNAME=$TOK"
     appid=$(python3 -c 'import json; d=json.load(open("/usr/share/pve-manager/js/k8s/apps.json")); a=(d.get("apps") or [{}])[0]; print(a.get("appid") or ((a.get("namespace","")+":"+a.get("name","")) if a else ""))' 2>/dev/null)
@@ -160,7 +185,7 @@ verify() {
         && ok "/k8sapp/$action rota registrada ($code)" \
         || fail "/k8sapp/$action -> $code (rota ausente)"
     done
-    pveum user token remove root@pam "$TOKNAME" >/dev/null 2>&1
+    K8SUI_TOK_CLEANUP
   else
     fail "sem token temporario para validar /k8sapp (pveum falhou?)"
     # higiene: remove residuo das versoes antigas que usavam nome fixo
