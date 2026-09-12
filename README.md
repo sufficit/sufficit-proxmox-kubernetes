@@ -132,6 +132,16 @@ Opções de ref: `--tag v1.0.0`, `--branch main`, `--tarball repo.tar.gz`
 (offline). Não usa `git` no host — só `curl` + `tar`, o que já existe em
 qualquer PVE.
 
+**Em cluster PVE, rode `update`/`verify` de UM nó por vez.** O `user.cfg`
+(compartilhado via pmxcfs) recebe as escritas do token efêmero do `verify`;
+escritas concorrentes vindas de vários nós ao mesmo tempo podem exaurir os
+buffers do corosync (`cpg_send_message failed: CS_ERR_TRY_AGAIN`) e travar o
+cluster filesystem (processos em D-state, quórum particionado). Recuperação:
+reinicie `corosync` nó a nó (sequencial), deixe o quório remontar 3/3 e então
+`systemctl restart pve-cluster` em cada nó. Desde a v1.0.2 o token do verify
+usa nome único por execução (`k8sui-verify-$$`), então execuções sequenciais
+nunca colidem no `user.cfg`.
+
 `uninstall` NÃO remove o K3s (`/usr/local/bin/k3s-uninstall.sh` faz isso).
 
 ## Reaplicar depois de upgrade do PVE

@@ -126,9 +126,15 @@ verify() {
 
   echo "== API k8sapp =="
   TOK=""; AUTH=""
-  TOK=$(pveum user token add root@pam k8sui-verify --privsep 0 --output-format json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' 2>/dev/null || true)
+  # Token efemero com nome UNICO por execucao: em cluster PVE o user.cfg e
+  # compartilhado (pmxcfs); dois verifies simultaneos (ou um run interrompido)
+  # deixam o token de nome fixo para tras -> "already exists" -> falso-negativo
+  # e rollback indevido. Pre-clean garante idempotencia.
+  TOKNAME="k8sui-verify-$$"
+  pveum user token remove root@pam "$TOKNAME" >/dev/null 2>&1 || true
+  TOK=$(pveum user token add root@pam "$TOKNAME" --privsep 0 --output-format json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' 2>/dev/null || true)
   if [ -n "$TOK" ]; then
-    AUTH="PVEAPIToken=root@pam!k8sui-verify=$TOK"
+    AUTH="PVEAPIToken=root@pam!$TOKNAME=$TOK"
     appid=$(python3 -c 'import json; d=json.load(open("/usr/share/pve-manager/js/k8s/apps.json")); a=(d.get("apps") or [{}])[0]; print(a.get("appid") or ((a.get("namespace","")+":"+a.get("name","")) if a else ""))' 2>/dev/null)
     code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -H "Authorization: $AUTH" -o /dev/null -w "%{http_code}" "https://$FQDN:8006/api2/json/nodes/$SHORT/k8sapp/$appid/rrddata?timeframe=hour")
     [ "$code" = 200 ] && ok "/k8sapp/{appid}/rrddata -> 200" || fail "/k8sapp/{appid}/rrddata -> $code"
@@ -154,9 +160,11 @@ verify() {
         && ok "/k8sapp/$action rota registrada ($code)" \
         || fail "/k8sapp/$action -> $code (rota ausente)"
     done
-    pveum user token remove root@pam k8sui-verify >/dev/null 2>&1
+    pveum user token remove root@pam "$TOKNAME" >/dev/null 2>&1
   else
-    fail "sem token temporario para validar /k8sapp"
+    fail "sem token temporario para validar /k8sapp (pveum falhou?)"
+    # higiene: remove residuo das versoes antigas que usavam nome fixo
+    pveum user token remove root@pam k8sui-verify >/dev/null 2>&1 || true
   fi
 
   echo "== API do PVE =="
