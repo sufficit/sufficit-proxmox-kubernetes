@@ -423,6 +423,7 @@ def build_apps():
         restarts = sum(c.get("restartCount", 0) for c in cs)
         phase = status.get("phase", "?")
 
+        pod_containers = []  # contêineres DESTE pod (app["containers"] é da aplicação)
         for c in spec.get("containers", []) or []:
             res = c.get("resources") or {}
             rr = res.get("requests") or {}
@@ -436,6 +437,15 @@ def build_apps():
                 app["images"].append(image)
             cst = cs_by_name.get(c.get("name")) or {}
             state = next(iter((cst.get("state") or {}).keys()), "unknown")
+            pod_containers.append(
+                {
+                    "name": c.get("name"),
+                    "image": image,
+                    "state": state,
+                    "ready": bool(cst.get("ready")),
+                    "restarts": cst.get("restartCount", 0),
+                }
+            )
             if not any(x["name"] == c.get("name") for x in app["containers"]):
                 app["containers"].append(
                     {
@@ -508,6 +518,7 @@ def build_apps():
                 "memMax": int(pod_lim_mem) if pod_lim_mem > 0 else int(node_mem),
                 "starttime": start,
                 "images": [c.get("image") for c in (spec.get("containers") or [])],
+                "containers": pod_containers,
             }
         )
         app["_restarts"] += restarts

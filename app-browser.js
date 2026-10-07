@@ -2308,6 +2308,145 @@ Ext.define('PVE.k8spod.CmdMenu', {
     },
 });
 
+/* StatusView do pod: mesma composicao do Summary de um LXC/VM (titulo com
+ * uptime, linhas com icone e valor a direita, barras de CPU/memoria) sobre os
+ * campos do pod no snapshot. A "CPU usage" e fracao do limite efetivo do pod
+ * (ou da capacidade do no, sem limite) -- a mesma escala dos graficos. */
+Ext.define('PVE.k8s.PodStatusView', {
+    extend: 'Proxmox.panel.StatusView',
+    alias: 'widget.pveK8sPodStatusView',
+
+    layout: {
+        type: 'vbox',
+        align: 'stretch',
+    },
+
+    defaults: {
+        xtype: 'pmxInfoWidget',
+        padding: '2 25',
+    },
+
+    statics: {
+        // Valores textuais vem do cluster: sempre escapados antes de virar HTML.
+        text: function (v) {
+            return Ext.htmlEncode(v === undefined || v === null || v === '' ? '\u2014' : String(v));
+        },
+        phaseColor: function (phase) {
+            if (phase === 'Running' || phase === 'Succeeded') return '#21a666';
+            if (phase === 'Failed' || phase === 'Unknown') return '#d9534f';
+            return '#d99b26';
+        },
+    },
+
+    items: [
+        {
+            xtype: 'box',
+            height: 20,
+        },
+        {
+            itemId: 'status',
+            title: gettext('Status'),
+            iconCls: 'fa fa-info fa-fw',
+            printBar: false,
+            multiField: true,
+            renderer: function (record) {
+                let phase = record.data.phase || 'Unknown';
+                let color = PVE.k8s.PodStatusView.phaseColor(phase);
+                return `<span style="color:${color};font-weight:600">${Ext.htmlEncode(phase)}</span>`;
+            },
+        },
+        {
+            itemId: 'ready',
+            iconCls: 'fa fa-check-circle-o fa-fw',
+            title: gettext('Ready'),
+            textField: 'ready',
+            printBar: false,
+            renderer: v => PVE.k8s.PodStatusView.text(v),
+        },
+        {
+            itemId: 'node',
+            iconCls: 'fa fa-building fa-fw',
+            title: gettext('Node'),
+            textField: 'node',
+            printBar: false,
+            renderer: v => PVE.k8s.PodStatusView.text(v),
+        },
+        {
+            itemId: 'application',
+            iconCls: 'fa fa-cubes fa-fw',
+            title: gettext('Application'),
+            textField: 'app',
+            printBar: false,
+            renderer: v => PVE.k8s.PodStatusView.text(v),
+        },
+        {
+            itemId: 'restarts',
+            iconCls: 'fa fa-refresh fa-fw',
+            title: gettext('Restarts'),
+            textField: 'restarts',
+            printBar: false,
+            renderer: v => PVE.k8s.PodStatusView.text(v),
+        },
+        {
+            xtype: 'box',
+            height: 10,
+        },
+        {
+            itemId: 'cpu',
+            iconCls: 'fa fa-fw pmx-itype-icon-processor pmx-icon',
+            title: gettext('CPU usage'),
+            valueField: 'cpu',
+            maxField: 'cpus',
+            renderer: Proxmox.Utils.render_cpu_usage,
+            calculate: Ext.identityFn,
+        },
+        {
+            itemId: 'memory',
+            iconCls: 'fa fa-fw pmx-itype-icon-memory pmx-icon',
+            title: gettext('Memory usage'),
+            valueField: 'mem',
+            maxField: 'maxmem',
+            renderer: Proxmox.Utils.render_size_usage,
+            calculate: (used, max) => (max > 0 ? used / max : 0),
+            warningThreshold: 0.9,
+            criticalThreshold: 0.975,
+        },
+        {
+            xtype: 'box',
+            height: 10,
+        },
+        {
+            itemId: 'podip',
+            iconCls: 'fa fa-exchange fa-fw',
+            title: gettext('Pod IP'),
+            textField: 'ip',
+            printBar: false,
+            renderer: v => PVE.k8s.PodStatusView.text(v),
+        },
+        {
+            itemId: 'hostip',
+            iconCls: 'fa fa-server fa-fw',
+            title: gettext('Host IP'),
+            textField: 'hostip',
+            printBar: false,
+            renderer: v => PVE.k8s.PodStatusView.text(v),
+        },
+    ],
+
+    updateTitle: function () {
+        let me = this;
+        let name = me.getRecordValue('name') || me.pveSelNode.data.name || '\u2014';
+        let ns = me.getRecordValue('namespace') || me.pveSelNode.data.namespace;
+        let uptime = Number(me.getRecordValue('uptime'));
+        let elapsed = uptime > 0
+            ? ` (${gettext('Uptime')}: ${Proxmox.Utils.format_duration_long(uptime)})`
+            : '';
+        me.setTitle(`<div class="left-aligned">${Ext.htmlEncode(name)}${elapsed}</div>` +
+            `<div class="right-aligned"><i class="fa fa-ship fa-fw"></i>&nbsp;` +
+            `${Ext.htmlEncode(ns || 'Kubernetes')}</div>`);
+    },
+});
+
 /* POC k8s: painel de um pod (tipo k8spod) na arvore. Resumo com os campos do
  * snapshot + graficos de CPU/memoria do proprio pod (endpoint
  * .../k8sapp/{appid}/pods/{pod}/rrddata, alimentado por pod-history.json) +
@@ -2338,8 +2477,16 @@ Ext.define('PVE.k8s.PodPanel', {
         let apiNode = PVE.k8s.PodPanel.apiNodeFromRecord(rec);
         let podName = rec.name;
 
-        let infoStore = Ext.create('Ext.data.Store', {
-            fields: ['key', 'value'],
+        // StatusView precisa de um ObjectStore (records key/value + getRecord()),
+        // como o Summary do LXC e o da aplicacao.
+        let statusStore = Ext.create('Proxmox.data.ObjectStore', {
+            model: 'KeyValue',
+            proxy: { type: 'memory', reader: { type: 'json' } },
+            data: [],
+        });
+        me.statusStore = statusStore;
+        let containerStore = Ext.create('Ext.data.Store', {
+            fields: ['name', 'image', 'state', 'ready', 'restarts'],
             data: [],
         });
 
@@ -2370,12 +2517,53 @@ Ext.define('PVE.k8s.PodPanel', {
                 minWidth: 700, defaults: { minHeight: 360, padding: 5 },
                 items: [
                     {
-                        xtype: 'grid', itemId: 'pod-grid', hideHeaders: true, store: infoStore,
-                        columnWidth: 1, height: 340, minHeight: 340,
-                        emptyText: gettext('No data'),
-                        columns: [
-                            { text: gettext('Name'), dataIndex: 'key', width: 220 },
-                            { text: gettext('Value'), dataIndex: 'value', flex: 1 },
+                        // Linha superior como no Summary do LXC: StatusView a
+                        // esquerda e, no lugar das Notes (pods nao tem), os
+                        // contêineres do pod a direita.
+                        xtype: 'container',
+                        columnWidth: 1,
+                        height: 330,
+                        minHeight: 330,
+                        layout: { type: 'hbox', align: 'stretch' },
+                        items: [
+                            {
+                                xtype: 'pveK8sPodStatusView', itemId: 'podstatus',
+                                pveSelNode: me.pveSelNode, rstore: statusStore,
+                                flex: 1, padding: '0 5 0 0',
+                            },
+                            {
+                                xtype: 'grid', itemId: 'pod-containers',
+                                title: gettext('Containers'), iconCls: 'fa fa-cube',
+                                store: containerStore, flex: 1, padding: '0 0 0 5',
+                                emptyText: gettext('No data'),
+                                viewConfig: { stripeRows: true },
+                                columns: [
+                                    {
+                                        text: gettext('Name'), dataIndex: 'name', width: 130,
+                                        renderer: v => Ext.htmlEncode(v || '\u2014'),
+                                    },
+                                    {
+                                        text: gettext('Image'), dataIndex: 'image', flex: 1,
+                                        renderer: v => Ext.htmlEncode(v || '\u2014'),
+                                    },
+                                    {
+                                        text: gettext('State'), dataIndex: 'state', width: 90,
+                                        renderer: v => v
+                                            ? `<span style="color:${v === 'running' ? '#21a666' : '#d99b26'};` +
+                                                `font-weight:600">${Ext.htmlEncode(v)}</span>`
+                                            : '\u2014',
+                                    },
+                                    {
+                                        text: gettext('Ready'), dataIndex: 'ready', width: 60,
+                                        renderer: v => (v === undefined || v === null
+                                            ? '\u2014' : (v ? gettext('Yes') : gettext('No'))),
+                                    },
+                                    {
+                                        text: gettext('Restarts'), dataIndex: 'restarts', width: 80,
+                                        renderer: v => (v === undefined || v === null ? '\u2014' : v),
+                                    },
+                                ],
+                            },
                         ],
                     },
                     {
@@ -2431,20 +2619,40 @@ Ext.define('PVE.k8s.PodPanel', {
             if (!app || me.destroyed) return;
             me.appData = app;
             let pod = (app.pods || []).find(p => p.name === podName) || {};
-            let rows = {};
-            rows[gettext('Application')] = `${app.name} [${app.namespace}]`;
-            rows[gettext('Pod')] = pod.name || podName;
-            rows[gettext('Status')] = pod.status || '\u2014';
-            rows[gettext('Ready')] = pod.ready || '\u2014';
-            rows[gettext('Restarts')] = String(pod.restarts ?? '\u2014');
-            rows[gettext('Age')] = pod.age || '\u2014';
-            rows[gettext('Node')] = pod.node || app.node || '\u2014';
-            rows[gettext('Pod IP')] = pod.ip || '\u2014';
-            rows[gettext('Host IP')] = pod.hostip || '\u2014';
-            rows[gettext('CPU')] = pod.cpu ?? '\u2014';
-            rows[gettext('Memory')] = pod.mem || '\u2014';
-            rows[gettext('Images')] = (pod.images || []).join(', ') || '\u2014';
-            infoStore.loadData(Object.entries(rows).map(([key, value]) => ({ key, value })));
+            let now = Math.floor(Date.now() / 1000);
+            // Mesma escala dos graficos: fracao do limite efetivo do pod
+            // (cpuMax em cores; sem limite declarado, a capacidade do no).
+            let cpuMax = Number(pod.cpuMax) > 0 ? Number(pod.cpuMax) : 0;
+            let data = {
+                name: pod.name || podName,
+                namespace: app.namespace,
+                app: app.name,
+                kind: app.kind,
+                node: pod.node || app.node,
+                phase: pod.status || 'Unknown',
+                ready: pod.ready,
+                restarts: pod.restarts ?? 0,
+                uptime: pod.starttime > 0 ? Math.max(0, now - pod.starttime) : 0,
+                cpus: cpuMax || 1,
+                cpu: cpuMax ? (Number(pod.cpuMilli) || 0) / 1000 / cpuMax : 0,
+                mem: Number(pod.memBytes) || 0,
+                maxmem: Number(pod.memMax) || 0,
+                ip: pod.ip,
+                hostip: pod.hostip,
+            };
+            // Alimenta o StatusView padrao como o ObjectStore do Proxmox faria
+            // com o status/current de um guest.
+            statusStore.removeAll();
+            Object.entries(data).forEach(([key, value]) => statusStore.add({ key, value }));
+            statusStore.fireEvent('load', statusStore, statusStore.getRange(), true);
+
+            // Snapshots antigos nao trazem os contêineres do pod: cai para a
+            // lista de imagens (uma linha por imagem, sem estado).
+            let containers = (pod.containers && pod.containers.length)
+                ? pod.containers
+                : (pod.images || []).map(image => ({ image }));
+            containerStore.loadData(containers);
+
             let updated = me.down('#k8s-updated');
             if (updated && app.generated) updated.update(`${gettext('Updated')}: ${Ext.htmlEncode(app.generated)}`);
         };
