@@ -195,13 +195,22 @@ test.describe('Kubernetes pods nested under real hosts (k8spod)', () => {
     );
     await page.waitForTimeout(500); // snapshot fetch
 
-    const rows = await page.evaluate(() => {
+    // Hosts em deploy anterior ao Summary no formato do LXC (pre-v1.0.5) ainda
+    // mostram a grade key/value (#pod-grid); os demais, o StatusView nativo.
+    // Cada formato e validado no seu proprio contrato (rollout gradual).
+    const legacy = await page.evaluate(() => {
       const panel = Ext.ComponentQuery.query('pveK8sPodPanel')[0];
-      const store = panel.down('#pod-grid')?.getStore();
-      if (!store) return null;
-      return Object.fromEntries(store.getRange().map((r) => [r.data.key, r.data.value]));
+      return !panel.down('pveK8sPodStatusView') && !!panel.down('#pod-grid');
     });
-    expect(rows, 'summary grid is loaded').not.toBeNull();
+    const rows = await page.evaluate((isLegacy) => {
+      const panel = Ext.ComponentQuery.query('pveK8sPodPanel')[0];
+      const store = isLegacy
+        ? panel.down('#pod-grid')?.getStore()
+        : panel.down('pveK8sPodStatusView')?.getStore();
+      if (!store || !store.getCount()) return null;
+      return Object.fromEntries(store.getRange().map((r) => [r.data.key, r.data.value]));
+    }, legacy);
+    expect(rows, 'pod summary is loaded').not.toBeNull();
     const appid = await page.evaluate(([n, h]) => {
       const r = PVE.data.ResourceStore.getData().items
         .find((x) => x.data.type === 'k8spod' && x.data.node === h && x.data.name === n);
@@ -209,10 +218,33 @@ test.describe('Kubernetes pods nested under real hosts (k8spod)', () => {
     }, [podName, host]);
     expect(appid, 'pod record carries its owning app').toBeTruthy();
     const [ns, appName] = appid.split('/');
-    expect(rows['Application']).toBe(`${appName} [${ns}]`);
-    expect(rows['Pod']).toBe(podName);
-    expect(rows['Node']).toBe(host);
-    expect(rows['Status']).toMatch(/Running|—/);
+    if (legacy) {
+      expect(rows['Application']).toBe(`${appName} [${ns}]`);
+      expect(rows['Pod']).toBe(podName);
+      expect(rows['Node']).toBe(host);
+      expect(rows['Status']).toMatch(/Running|—/);
+    } else {
+      expect(rows.app).toBe(appName);
+      expect(rows.namespace).toBe(ns);
+      expect(rows.name).toBe(podName);
+      expect(rows.node).toBe(host);
+      expect(typeof rows.phase).toBe('string');
+
+      // Os widgets do StatusView renderizam o que o LXC mostra: Status, CPU e
+      // memoria com barra, IPs. E a grade de contêineres existe ao lado.
+      const view = await page.evaluate(() => {
+        const panel = Ext.ComponentQuery.query('pveK8sPodPanel')[0];
+        const status = panel.down('pveK8sPodStatusView');
+        return {
+          bars: status.query('pmxInfoWidget').filter((w) => w.printBar).map((w) => w.itemId),
+          title: status.getTitle(),
+          containers: !!panel.down('#pod-containers'),
+        };
+      });
+      expect(view.bars).toEqual(['cpu', 'memory']);
+      expect(view.title).toContain(podName);
+      expect(view.containers, 'containers grid beside the status view').toBe(true);
+    }
   });
 
   test('pod panel Summary shows CPU and Memory charts backed by the pod rrddata', async ({ page }) => {

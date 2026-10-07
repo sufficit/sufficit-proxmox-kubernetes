@@ -218,8 +218,14 @@ Cada pod do snapshot sobe em `/cluster/resources` como recurso `k8spod` com
 - **Folder View**: pasta "Kubernetes Pods" com o cluster INTEIRO (inclui os
   pods de outros PVEs — publicados com node='Kubernetes', sem nunca
   materializar host-fantasma na Server View).
-- Clique no pod: painel `pveK8sPodPanel` (resumo + **gráficos de CPU e memória
-  do próprio pod** + Console do próprio pod). Os gráficos usam os mesmos
+- Clique no pod: painel `pveK8sPodPanel` (Summary no mesmo formato do de um
+  LXC/VM + **gráficos de CPU e memória do próprio pod** + Console do próprio
+  pod). O Summary tem à esquerda o `StatusView` nativo (título com nome e
+  uptime, namespace à direita, Status colorido, Ready, Node, Application,
+  Restarts, barras de **CPU usage** e **Memory usage**, Pod IP e Host IP) e, no
+  lugar das Notes, a grade **Containers** do próprio pod (nome, imagem, estado,
+  pronto, restarts — vem de `apps.json`; snapshot antigo cai para a lista de
+  imagens). Os gráficos usam os mesmos
   componentes nativos da aplicação (`proxmoxRRDChart` + seletor de período) e
   leem `GET /nodes/{node}/k8sapp/{appid}/pods/{pod}/rrddata`, alimentado por
   `pod-history.json` (1 amostra/minuto do metrics-server, ~25 h por pod;
