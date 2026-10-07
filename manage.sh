@@ -85,11 +85,17 @@ verify() {
   [ -s "$K8S_DIR/apps.json" ] && ok "apps.json presente" || fail "apps.json ausente"
   [ -s "$K8S_DIR/status.json" ] && ok "status.json presente" || fail "status.json ausente"
   [ -s "$K8S_DIR/history.json" ] && ok "history.json presente" || fail "history.json ausente"
+  # pod-history.json nasce do primeiro tick do cron apos a atualizacao do
+  # gerador: se o verify rodar antes disso, gera uma vez (idempotente, e o
+  # mesmo que o cron faz a cada minuto) em vez de acusar falso negativo.
+  if [ ! -s "$K8S_DIR/pod-history.json" ] && [ -x "$GEN" ]; then "$GEN" >/dev/null 2>&1 || true; fi
+  [ -s "$K8S_DIR/pod-history.json" ] && ok "pod-history.json presente" || fail "pod-history.json ausente (graficos por pod)"
   [ -f "$K8S_STATE_DIR/desired.json" ] && ok "desired.json persistente presente" || ok "desired.json ainda vazio (criado ao primeiro Stop/Scale)"
   [ -f "$K8S_STATE_DIR/notes.json" ] && ok "notes.json persistente presente" || ok "notes.json ainda vazio (criado no primeiro Notes save)"
   [ ! -e "$K8S_DIR/notes.json" ] && ok "diretorio estatico sem notes.json" || fail "notes.json no diretorio estatico (mover para $K8S_STATE_DIR)"
   grep -q "k8s_task_id\|fork_worker" "$K8SAPP_PM" && ok "acoes k8sapp viram tasks PVE (fork_worker)" || fail "K8sApp.pm sem integracao de tasks"
   grep -q "k8stermproxy" "$K8SAPP_PM" && ok "console interativo (termproxy) presente em K8sApp.pm" || fail "K8sApp.pm sem termproxy"
+  grep -q "{appid}/pods/{pod}/rrddata" "$K8SAPP_PM" && ok "graficos por pod (pods/{pod}/rrddata) presentes em K8sApp.pm" || fail "K8sApp.pm sem pods/{pod}/rrddata"
   grep -q "pveK8sConsole\|loadXterm" "$K8S_DIR/app-browser.js" && ok "app-browser.js com widget de console (xterm.js)" || fail "app-browser.js sem console"
   [ -x "$GEN" ] && ok "gerador instalado ($GEN)" || fail "gerador ausente"
   crontab -l 2>/dev/null | grep -q gen-k8s-status && ok "cron ativo (1 min)" || fail "cron ausente"
@@ -163,6 +169,13 @@ except Exception:
     appid=$(python3 -c 'import json; d=json.load(open("/usr/share/pve-manager/js/k8s/apps.json")); a=(d.get("apps") or [{}])[0]; print(a.get("appid") or ((a.get("namespace","")+":"+a.get("name","")) if a else ""))' 2>/dev/null)
     code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -H "Authorization: $AUTH" -o /dev/null -w "%{http_code}" "https://$FQDN:8006/api2/json/nodes/$SHORT/k8sapp/$appid/rrddata?timeframe=hour")
     [ "$code" = 200 ] && ok "/k8sapp/{appid}/rrddata -> 200" || fail "/k8sapp/{appid}/rrddata -> $code"
+    podname=$(python3 -c 'import json; d=json.load(open("/usr/share/pve-manager/js/k8s/apps.json")); a=(d.get("apps") or [{}])[0]; print(((a.get("pods") or [{}])[0]).get("name",""))' 2>/dev/null)
+    if [ -n "$podname" ]; then
+      code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -H "Authorization: $AUTH" -o /dev/null -w "%{http_code}" "https://$FQDN:8006/api2/json/nodes/$SHORT/k8sapp/$appid/pods/$podname/rrddata?timeframe=hour")
+      [ "$code" = 200 ] && ok "/k8sapp/{appid}/pods/{pod}/rrddata -> 200" || fail "/k8sapp/{appid}/pods/{pod}/rrddata -> $code"
+      code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -H "Authorization: $AUTH" -o /dev/null -w "%{http_code}" "https://$FQDN:8006/api2/json/nodes/$SHORT/k8sapp/$appid/pods/pod-inexistente-k8sui/rrddata?timeframe=hour")
+      [ "$code" != 200 ] && ok "pods/{pod}/rrddata rejeita pod que nao pertence a app ($code)" || fail "pods/{pod}/rrddata aceitou pod inexistente"
+    fi
     code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -H "Authorization: $AUTH" -o /dev/null -w "%{http_code}" "https://$FQDN:8006/api2/extjs/nodes/$SHORT/k8sapp/$appid/config")
     [ "$code" = 200 ] && ok "/k8sapp/{appid}/config -> 200" || fail "/k8sapp/{appid}/config -> $code"
     code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -H "Authorization: $AUTH" -o /dev/null -w "%{http_code}" "https://$FQDN:8006/api2/extjs/nodes/$SHORT/k8sapp/$appid/tasks?source=all")
@@ -234,7 +247,7 @@ uninstall() {
   perl -MPVE::Cluster -e 'PVE::Cluster::broadcast_node_kv("k8snet-network", undef)' 2>/dev/null \
     && echo "  removido: snapshot k8snet do pmxcfs"
   if [ -d "$K8S_DIR" ]; then
-    rm -f "$K8S_DIR/index.html" "$K8S_DIR/status.json" "$K8S_DIR/apps.json" "$K8S_DIR/app-browser.js" "$K8S_DIR/history.json"
+    rm -f "$K8S_DIR/index.html" "$K8S_DIR/status.json" "$K8S_DIR/apps.json" "$K8S_DIR/app-browser.js" "$K8S_DIR/history.json" "$K8S_DIR/pod-history.json"
     rmdir "$K8S_DIR" 2>/dev/null && echo "  removido: $K8S_DIR"
   fi
   # guard precisa sair ANTES de qualquer restauracao: se ficar ativo ele

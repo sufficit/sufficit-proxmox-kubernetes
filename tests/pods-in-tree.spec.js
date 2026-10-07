@@ -215,6 +215,59 @@ test.describe('Kubernetes pods nested under real hosts (k8spod)', () => {
     expect(rows['Status']).toMatch(/Running|—/);
   });
 
+  test('pod panel Summary shows CPU and Memory charts backed by the pod rrddata', async ({ page }) => {
+    await login(page);
+    await expandAll(page);
+
+    const podName = (await podsInTree(page, `node/${host}`))[0];
+    expect(podName, 'a pod is present under the host').toBeTruthy();
+    await page.evaluate(([n, h]) => {
+      const tree = Ext.ComponentQuery.query('pveResourceTree')[0];
+      tree.selectById(`k8spod/${h}/${n}`);
+    }, [podName, host]);
+    await page.waitForFunction(
+      () => Ext.ComponentQuery.query('pveK8sPodPanel').length > 0,
+      null, { timeout: 30000 },
+    );
+
+    // Two RRD charts (CPU + Memory) share the pod's own RRDStore, and the
+    // store URL is the per-pod endpoint (pod in the path, bare rrdurl).
+    const info = await page.evaluate(() => {
+      const panel = Ext.ComponentQuery.query('pveK8sPodPanel')[0];
+      const charts = panel.query('proxmoxRRDChart');
+      return {
+        charts: charts.map((c) => c.getTitle()),
+        sameStore: charts.length === 2 && charts[0].getStore() === charts[1].getStore(),
+        rrdurl: panel.rrdstore && panel.rrdstore.rrdurl,
+        selector: panel.query('proxmoxRRDTypeSelector').length,
+      };
+    });
+    expect(info.charts).toEqual(['CPU Usage', 'Memory Usage']);
+    expect(info.sameStore, 'both charts read the same pod RRD store').toBe(true);
+    expect(info.rrdurl).toMatch(new RegExp(`/k8sapp/[^/]+/pods/${podName}/rrddata$`));
+    expect(info.selector, 'timeframe selector present').toBe(1);
+
+    // The endpoint answers 200 with the sample shape the charts consume.
+    const url = await page.evaluate(() => {
+      const panel = Ext.ComponentQuery.query('pveK8sPodPanel')[0];
+      return panel.rrdstore.proxy.url;
+    });
+    const resp = await page.request.get(`${pveBase}${url}`);
+    expect(resp.ok(), `pod rrddata -> ${resp.status()}`).toBeTruthy();
+    const rows = (await resp.json()).data;
+    expect(Array.isArray(rows)).toBe(true);
+    if (rows.length) {
+      for (const k of ['time', 'cpu', 'mem', 'maxmem', 'maxcpu']) {
+        expect(rows[rows.length - 1], `sample has ${k}`).toHaveProperty(k);
+      }
+    }
+
+    // A pod that does not belong to the application is rejected.
+    const bad = url.replace(`/pods/${podName}/`, '/pods/pod-inexistente-k8sui/');
+    const badResp = await page.request.get(`${pveBase}${bad}`);
+    expect(badResp.ok(), 'foreign pod must not be served').toBeFalsy();
+  });
+
   test('pod context menu offers pod actions (no node menu)', async ({ page }) => {
     await login(page);
     await expandAll(page);

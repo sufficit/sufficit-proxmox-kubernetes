@@ -2309,8 +2309,10 @@ Ext.define('PVE.k8spod.CmdMenu', {
 });
 
 /* POC k8s: painel de um pod (tipo k8spod) na arvore. Resumo com os campos do
- * snapshot + Console/Logs do proprio pod (pre-selecionado). Mutacoes seguem
- * no menu de contexto, como no painel da aplicacao. */
+ * snapshot + graficos de CPU/memoria do proprio pod (endpoint
+ * .../k8sapp/{appid}/pods/{pod}/rrddata, alimentado por pod-history.json) +
+ * Console/Logs do proprio pod (pre-selecionado). Mutacoes seguem no menu de
+ * contexto, como no painel da aplicacao. */
 Ext.define('PVE.k8s.PodPanel', {
     extend: 'PVE.panel.Config',
     alias: 'widget.pveK8sPodPanel',
@@ -2341,24 +2343,55 @@ Ext.define('PVE.k8s.PodPanel', {
             data: [],
         });
 
+        // Same RRD plumbing as the application Summary (pve-rrd-k8sapp model and
+        // the shared timeframe selector), pointed at THIS pod's series. The pod
+        // name is DNS-1123 (no encoding needed); the owning application is part
+        // of the path so the server can check the pod belongs to it.
+        me.rrdstore = Ext.create('Proxmox.data.RRDStore', {
+            rrdurl: `/api2/json/nodes/${apiNode}/k8sapp/${appid}/pods/${podName}/rrddata`,
+            model: 'pve-rrd-k8sapp',
+        });
+
         let summary = {
             xtype: 'panel',
             itemId: 'summary',
             title: gettext('Summary'),
             iconCls: 'fa fa-book',
-            layout: 'fit',
+            scrollable: true,
+            bodyPadding: 5,
             tbar: [
                 '->',
                 { xtype: 'component', itemId: 'k8s-updated', html: '' },
+                '-',
+                { xtype: 'proxmoxRRDTypeSelector' },
             ],
-            items: {
-                xtype: 'grid', itemId: 'pod-grid', hideHeaders: true, store: infoStore,
-                emptyText: gettext('No data'),
-                columns: [
-                    { text: gettext('Name'), dataIndex: 'key', width: 220 },
-                    { text: gettext('Value'), dataIndex: 'value', flex: 1 },
+            items: [{
+                xtype: 'container', itemId: 'itemcontainer', layout: { type: 'column' },
+                minWidth: 700, defaults: { minHeight: 360, padding: 5 },
+                items: [
+                    {
+                        xtype: 'grid', itemId: 'pod-grid', hideHeaders: true, store: infoStore,
+                        columnWidth: 1, height: 340, minHeight: 340,
+                        emptyText: gettext('No data'),
+                        columns: [
+                            { text: gettext('Name'), dataIndex: 'key', width: 220 },
+                            { text: gettext('Value'), dataIndex: 'value', flex: 1 },
+                        ],
+                    },
+                    {
+                        xtype: 'proxmoxRRDChart', title: gettext('CPU Usage'), columnWidth: 0.5,
+                        pveSelNode: me.pveSelNode, fields: ['cpu'],
+                        fieldTitles: [gettext('CPU usage')], unit: 'percent', store: me.rrdstore,
+                    },
+                    {
+                        xtype: 'proxmoxRRDChart', title: gettext('Memory Usage'), columnWidth: 0.5,
+                        pveSelNode: me.pveSelNode, fields: ['maxmem', 'mem'],
+                        fieldTitles: [gettext('Total'), gettext('Used')], colors: ['#94ae0a', '#115fa6'],
+                        unit: 'bytes', powerOfTwo: true, store: me.rrdstore,
+                    },
                 ],
-            },
+                listeners: { resize: container => Proxmox.Utils.updateColumns(container) },
+            }],
         };
 
         let consolePanel = {
@@ -2391,9 +2424,12 @@ Ext.define('PVE.k8s.PodPanel', {
         });
 
         me.callParent();
+        me.rrdstore.startUpdate();
+        me.on('destroy', me.rrdstore.stopUpdate, me.rrdstore);
 
         let apply = app => {
             if (!app || me.destroyed) return;
+            me.appData = app;
             let pod = (app.pods || []).find(p => p.name === podName) || {};
             let rows = {};
             rows[gettext('Application')] = `${app.name} [${app.namespace}]`;
@@ -2412,6 +2448,52 @@ Ext.define('PVE.k8s.PodPanel', {
             let updated = me.down('#k8s-updated');
             if (updated && app.generated) updated.update(`${gettext('Updated')}: ${Ext.htmlEncode(app.generated)}`);
         };
+        me.applyAppData = apply;
         PVE.k8s.getApp(appid, apply);
+    },
+
+    // Same card-switch protection as PVE.k8s.AppBrowser: PVE.panel.Config
+    // destroys and re-creates the Summary card (with its column-layout
+    // charts) on every tab change. Without this the re-created charts keep the
+    // saved columnWidth (0.5) and the layout stays suspended if a destroy
+    // listener throws; the "Updated" label also needs to be re-applied.
+    repairActiveCardLayout: function () {
+        let me = this;
+        if (me.destroyed || me.destroying) return;
+        let card = me.getLayout().getActiveItem();
+        let container = card && card.itemId === 'summary'
+            ? card.down('#itemcontainer') : null;
+        if (!container) return;
+
+        let repair = function () {
+            if (me.destroyed || me.destroying || container.destroyed) return;
+            if (container.getWidth() <= 0) {
+                container.on('boxready', repair, null, { single: true });
+                return;
+            }
+            container.oldFactor = null;
+            Proxmox.Utils.updateColumnWidth(container);
+        };
+        repair();
+    },
+
+    activateCard: function (cardid) {
+        let me = this;
+        try {
+            me.callParent(arguments);
+        } catch (e) {
+            console.warn('k8s-ui: pod card switch failed, recovering layout', e);
+        } finally {
+            me.suspendLayout = false;
+        }
+        Ext.defer(() => {
+            if (me.destroyed || me.destroying) return;
+            me.updateLayout();
+            me.repairActiveCardLayout();
+            if (me.appData && me.applyAppData) {
+                try { me.applyAppData(me.appData); } catch (e) { /* keep layout alive */ }
+            }
+            me.repairActiveCardLayout();
+        }, 10);
     },
 });
