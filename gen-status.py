@@ -10,6 +10,8 @@ POC: gera os JSONs lidos pela UI do Proxmox. Roda por cron a cada minuto.
                    * K8sApp.pm   -> /nodes/{node}/k8sapp/{appid}/... (painéis)
 - history.json : série temporal por aplicação (CPU/memória/pods/restarts), usada
                  pelo endpoint rrddata para desenhar os mesmos gráficos do guest.
+- pod-history.json : série temporal por POD (CPU/memória do metrics-server), usada
+                 pelo endpoint podrrddata (gráficos do painel do pod na árvore).
 
 Somente leitura de dados locais; não expõe segredos.
 """
@@ -24,11 +26,16 @@ OUT_DIR = "/usr/share/pve-manager/js/k8s"
 OUT_STATUS = os.path.join(OUT_DIR, "status.json")
 OUT_APPS = os.path.join(OUT_DIR, "apps.json")
 OUT_HISTORY = os.path.join(OUT_DIR, "history.json")
+OUT_POD_HISTORY = os.path.join(OUT_DIR, "pod-history.json")
 K3S = "/usr/local/bin/k3s"
 NODENAME = socket.gethostname().split(".")[0]
 
 # 1 amostra/minuto: 1500 amostras ~ 25h (cobre os recortes Hour e Day da UI)
 HISTORY_MAX = 1500
+# Mesma janela para pods. O arquivo e compacto ([ts, milicores, bytes] por
+# amostra, sem indentacao) para caber ~centenas de pods bem abaixo do teto de
+# 32 MiB que o k8sapp.pm aceita ler.
+POD_HISTORY_MAX = HISTORY_MAX
 
 
 def kc_json(*args, timeout=20):
@@ -128,12 +135,15 @@ def fmt_mem(b):
     return f"{mib:.0f}Mi"
 
 
-def write_json(path, obj):
+def write_json(path, obj, compact=False):
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
     with os.fdopen(fd, "w") as f:
-        json.dump(obj, f, indent=1)
+        if compact:
+            json.dump(obj, f, separators=(",", ":"))
+        else:
+            json.dump(obj, f, indent=1)
     os.chmod(tmp, 0o644)
     os.replace(tmp, path)
 
@@ -462,6 +472,16 @@ def build_apps():
                 app["volumes"].append(entry)
 
         cpu_m, mem_b = metrics.get((ns, pname), (0.0, 0))
+        # limites efetivos do POD (mesma regra da aplicacao: limite declarado
+        # ou, sem limite, a capacidade do no) para os graficos por pod.
+        pod_lim_cpu = sum(
+            cpu_milli(((c.get("resources") or {}).get("limits") or {}).get("cpu"))
+            for c in (spec.get("containers") or [])
+        )
+        pod_lim_mem = sum(
+            mem_bytes(((c.get("resources") or {}).get("limits") or {}).get("memory"))
+            for c in (spec.get("containers") or [])
+        )
         app["_cpu"] += cpu_m
         app["_mem"] += mem_b
         start = epoch(status.get("startTime") or meta.get("creationTimestamp"))
@@ -481,6 +501,11 @@ def build_apps():
                 "hostip": status.get("hostIP") or "—",
                 "cpu": fmt_cpu(cpu_m),
                 "mem": fmt_mem(mem_b),
+                # valores numericos para pod-history.json (graficos do pod)
+                "cpuMilli": int(round(cpu_m)),
+                "memBytes": int(mem_b),
+                "cpuMax": round(pod_lim_cpu / 1000.0, 3) if pod_lim_cpu > 0 else node_cpus,
+                "memMax": int(pod_lim_mem) if pod_lim_mem > 0 else int(node_mem),
                 "starttime": start,
                 "images": [c.get("image") for c in (spec.get("containers") or [])],
             }
@@ -590,6 +615,7 @@ def build_apps():
         {"generated": datetime.datetime.now().isoformat(timespec="seconds"), "apps": out},
     )
     build_history(out, now)
+    build_pod_history(out, now)
     return len(out)
 
 
@@ -622,7 +648,38 @@ def build_history(apps, now):
     write_json(OUT_HISTORY, {"generated": now, "series": series})
 
 
+# ----------------------------------------------------------- pod-history.json
+def build_pod_history(apps, now):
+    """Serie temporal por POD, consumida pelo endpoint podrrddata.
+
+    Chave = "<namespace>:<pod>" (nomes de pod sao unicos por namespace).
+    Amostra = [ts, milicores, bytes]. Os maximos (limite efetivo) viajam so na
+    entrada "max" do pod, porque mudam raramente e o grafico usa o valor atual.
+    Pods que sumiram saem do arquivo (pod recriado = nome novo = serie nova).
+    """
+    hist = read_json(OUT_POD_HISTORY, {})
+    series = hist.get("series") or {}
+    maxes = {}
+    alive = set()
+    for a in apps:
+        for p in a["pods"]:
+            key = f"{a['namespace']}:{p['name']}"
+            alive.add(key)
+            samples = series.get(key) or []
+            samples.append([now, p.get("cpuMilli", 0), p.get("memBytes", 0)])
+            series[key] = samples[-POD_HISTORY_MAX:]
+            maxes[key] = [p.get("cpuMax", 0), p.get("memMax", 0)]
+    for key in list(series):
+        if key not in alive:
+            del series[key]
+    write_json(
+        OUT_POD_HISTORY,
+        {"generated": now, "max": maxes, "series": series},
+        compact=True,
+    )
+
+
 if __name__ == "__main__":
     build_status()
     n = build_apps()
-    print(f"ok: {OUT_STATUS} / {OUT_APPS} / {OUT_HISTORY} ({n} apps)")
+    print(f"ok: {OUT_STATUS} / {OUT_APPS} / {OUT_HISTORY} / {OUT_POD_HISTORY} ({n} apps)")

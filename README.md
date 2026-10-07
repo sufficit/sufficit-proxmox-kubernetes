@@ -218,12 +218,21 @@ Cada pod do snapshot sobe em `/cluster/resources` como recurso `k8spod` com
 - **Folder View**: pasta "Kubernetes Pods" com o cluster INTEIRO (inclui os
   pods de outros PVEs — publicados com node='Kubernetes', sem nunca
   materializar host-fantasma na Server View).
-- Clique no pod: painel `pveK8sPodPanel` (resumo + Console do próprio pod).
+- Clique no pod: painel `pveK8sPodPanel` (resumo + **gráficos de CPU e memória
+  do próprio pod** + Console do próprio pod). Os gráficos usam os mesmos
+  componentes nativos da aplicação (`proxmoxRRDChart` + seletor de período) e
+  leem `GET /nodes/{node}/k8sapp/{appid}/pods/{pod}/rrddata`, alimentado por
+  `pod-history.json` (1 amostra/minuto do metrics-server, ~25 h por pod;
+  gerado pelo mesmo `gen-k8s-status.py`). CPU é a fração do limite do pod (ou
+  da capacidade do nó, se o pod não declara limite); memória mostra o limite
+  efetivo como "Total". Pods que somem do cluster saem do arquivo — pod
+  recriado tem nome novo e começa série nova. O endpoint rejeita pods que não
+  pertencem à aplicação do caminho.
 - Botão direito no pod: Console / Pod logs / Describe pod / View YAML /
   Delete pod (a validação de permissão do pod é a mesma do app).
 - `describe?pod=<nome>` restringe o kubectl ao pod (validado contra o snapshot).
 
-Não há rotas novas: tudo reusa os endpoints `/nodes/{node}/k8sapp/...`, com o
+Salvo a rota de gráficos acima, tudo reusa os endpoints `/nodes/{node}/k8sapp/...`, com o
 nó real viajando no campo `k8snode` do registro do pod.
 
 ## Instalação em outros hosts PVE do cluster k8s
@@ -254,7 +263,7 @@ Notas:
   alterar caso nenhuma case exatamente 1x.
 - O cron do `gen-k8s-status.py` agora é instalado pelo próprio patcher
   (instalações anteriores o tinham criado à mão — é o que publica
-  apps.json/status.json/history.json a cada minuto).
+  apps.json/status.json/history.json/pod-history.json a cada minuto).
 - `manage.sh verify` trata `docker` como opcional (hosts sem Docker).
 - Suite E2E: `PVE_URL`/`PVE_USER`/`PVE_PASSWORD`/`PVE_HOST` apontam para o
   host alvo; os testes não dependem mais de nomes fixos de pods/apps nem

@@ -23,6 +23,7 @@ use base qw(PVE::RESTHandler);
 
 my $apps_file = '/usr/share/pve-manager/js/k8s/apps.json';
 my $history_file = '/usr/share/pve-manager/js/k8s/history.json';
+my $pod_history_file = '/usr/share/pve-manager/js/k8s/pod-history.json';
 my $notes_file = '/usr/share/pve-manager/js/k8s/notes.json';
 # User state lives with the other PVE state (jobs/, pkgupdates/): /var/lib is
 # writable by pvedaemon (root, where the protected PUT runs) and its
@@ -1105,6 +1106,62 @@ __PACKAGE__->register_method({
                 mem => $s->[3], maxmem => $s->[4],
                 netin => 0, netout => 0,
                 pressurecpusome => 0, pressurecpufull => 0,
+            };
+        }
+        return \@result;
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'podrrddata',
+    # The pod goes in the path (not the query string): Proxmox.data.RRDStore
+    # appends '?timeframe=..&cf=..' to its rrdurl, so rrdurl must be a bare path.
+    path => '{appid}/pods/{pod}/rrddata',
+    method => 'GET',
+    protected => 1,
+    permissions => { check => ['perm', '/nodes/{node}', ['Sys.Audit']] },
+    description => 'Read CPU/memory statistics of one pod of a Kubernetes application.',
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            appid => { type => 'string', description => 'Namespace:name application identifier.' },
+            pod => { type => 'string', description => 'Pod name (must belong to the application).' },
+            timeframe => { type => 'string', enum => ['hour', 'day', 'week', 'month', 'year'], optional => 1 },
+            cf => { type => 'string', enum => ['AVERAGE', 'MAX'], optional => 1 },
+        },
+    },
+    returns => { type => 'array', items => { type => 'object', properties => {} } },
+    code => sub {
+        my ($param) = @_;
+        my $app = app_from_id($param->{appid});
+        raise_param_exc({ appid => 'Kubernetes application not found' }) if !$app;
+        # Same ownership rule as the pod log: the pod must belong to the app.
+        my $allowed = 0;
+        for my $pod (@{ $app->{pods} || [] }) {
+            if (($pod->{name} // '') eq $param->{pod}) { $allowed = 1; last; }
+        }
+        raise_param_exc({ pod => 'Pod does not belong to this application' }) if !$allowed;
+
+        # pod-history.json: { max => { "ns:pod" => [cpuLimitCores, memLimitBytes] },
+        #                     series => { "ns:pod" => [[ts, milliCPU, memBytes], ...] } }
+        # 1 sample/minute, kept for POD_HISTORY_MAX samples (see gen-status.py).
+        my $key = ($app->{namespace} // '') . ':' . $param->{pod};
+        my $data = read_json_file($pod_history_file) || {};
+        my $samples = $data->{series}{$key} || [];
+        my ($maxcpu, $maxmem) = @{ $data->{max}{$key} || [0, 0] };
+        my %tail_of = (hour => 70, day => 1440, week => 10080, month => 43200, year => 525600);
+        my $tail = $tail_of{ $param->{timeframe} // 'hour' } // 1440;
+        my @slice = scalar(@$samples) > $tail ? @$samples[-$tail .. -1] : @$samples;
+        my @result;
+        for my $s (@slice) {
+            # cpu is a fraction of the pod's effective CPU limit (declared limit,
+            # or the node capacity when the pod has none) -- the same scale the
+            # application chart and the guest charts use (the UI multiplies by 100).
+            my $cpu = ($maxcpu && $maxcpu > 0) ? ($s->[1] / 1000.0) / $maxcpu : 0;
+            push @result, {
+                time => $s->[0], cpu => $cpu, maxcpu => $maxcpu + 0,
+                mem => $s->[2], maxmem => $maxmem + 0,
             };
         }
         return \@result;
