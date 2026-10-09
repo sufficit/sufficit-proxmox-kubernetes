@@ -46,13 +46,20 @@ test.describe('Node Kubernetes tab - aggregated usage charts', () => {
     await login(page);
 
     // The card stays hidden until node-history.json has >= 2 samples (cron
-    // ticks every minute). On a fresh deploy wait for the second sample.
-    const hist = await page.waitForFunction(async () => {
-      const r = await fetch('/pve2/js/k8s/node-history.json', { headers: { accept: 'application/json' } });
-      if (!r.ok) return null;
-      const h = await r.json();
-      return (h.series || []).length >= 2 ? h : null;
-    }, null, { timeout: 150_000 }).catch(() => null);
+    // ticks every minute). Poll from Node (page.request shares the cookie
+    // jar) before navigating: on a fresh deploy the 2nd sample can take ~1 min.
+    let hist = null;
+    const deadline = Date.now() + 150_000;
+    while (Date.now() < deadline) {
+      const r = await page.request.get(`${pveBase}/pve2/js/k8s/node-history.json`);
+      if (r.ok()) {
+        const h = await r.json();
+        if ((h.series || []).length >= 2) { hist = h; break; }
+      } else if (r.status() === 404) {
+        break; // deploy antigo: nem adianta esperar
+      }
+      await page.waitForTimeout(10_000);
+    }
     test.skip(!hist, 'node-history.json ausente ou com <2 amostras (deploy pre-v1.0.6 ou recem-instalado)');
 
     // The tab is a plain iframe: load the page directly (same origin, same
