@@ -12,6 +12,9 @@ POC: gera os JSONs lidos pela UI do Proxmox. Roda por cron a cada minuto.
                  pelo endpoint rrddata para desenhar os mesmos gráficos do guest.
 - pod-history.json : série temporal por POD (CPU/memória do metrics-server), usada
                  pelo endpoint podrrddata (gráficos do painel do pod na árvore).
+- node-history.json : série temporal agregada do NÓ (soma de CPU/memória de todos
+                 os pods com spec.nodeName == este host, qualquer namespace),
+                 lida pela aba Kubernetes do nó (index.html) para os gráficos.
 
 Somente leitura de dados locais; não expõe segredos.
 """
@@ -27,6 +30,7 @@ OUT_STATUS = os.path.join(OUT_DIR, "status.json")
 OUT_APPS = os.path.join(OUT_DIR, "apps.json")
 OUT_HISTORY = os.path.join(OUT_DIR, "history.json")
 OUT_POD_HISTORY = os.path.join(OUT_DIR, "pod-history.json")
+OUT_NODE_HISTORY = os.path.join(OUT_DIR, "node-history.json")
 K3S = "/usr/local/bin/k3s"
 NODENAME = socket.gethostname().split(".")[0]
 
@@ -627,6 +631,7 @@ def build_apps():
     )
     build_history(out, now)
     build_pod_history(out, now)
+    build_node_history(out, now)
     return len(out)
 
 
@@ -686,6 +691,42 @@ def build_pod_history(apps, now):
     write_json(
         OUT_POD_HISTORY,
         {"generated": now, "max": maxes, "series": series},
+        compact=True,
+    )
+
+
+def build_node_history(apps, now):
+    """Série temporal agregada do NÓ (aba Kubernetes do nó no PVE).
+
+    Soma CPU/memória de TODOS os pods com spec.nodeName == este host (qualquer
+    namespace), conforme reportado pelo metrics-server. Amostra única
+    [ts, milicores, bytes]; os máximos (capacidade do nó) viajam na chave
+    "max" porque o gráfico usa o valor atual. Simétrico ao pod-history:
+    1 amostra/minuto, janela HISTORY_MAX.
+    """
+    cpu_m = 0.0
+    mem_b = 0
+    n_pods = 0
+    for a in apps:
+        for p in a["pods"]:
+            if (p.get("node") or NODENAME) != NODENAME:
+                continue
+            n_pods += 1
+            cpu_m += p.get("cpuMilli", 0)
+            mem_b += p.get("memBytes", 0)
+    cpus, maxmem = node_capacity()
+    hist = read_json(OUT_NODE_HISTORY, {})
+    samples = (hist.get("series") or [])
+    samples.append([now, int(round(cpu_m)), int(mem_b)])
+    write_json(
+        OUT_NODE_HISTORY,
+        {
+            "generated": now,
+            "max": [cpus * 1000.0, maxmem],
+            "node": NODENAME,
+            "pods": n_pods,
+            "series": samples[-HISTORY_MAX:],
+        },
         compact=True,
     )
 
