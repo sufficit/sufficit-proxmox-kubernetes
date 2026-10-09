@@ -90,6 +90,9 @@ verify() {
   # mesmo que o cron faz a cada minuto) em vez de acusar falso negativo.
   if [ ! -s "$K8S_DIR/pod-history.json" ] && [ -x "$GEN" ]; then "$GEN" >/dev/null 2>&1 || true; fi
   [ -s "$K8S_DIR/pod-history.json" ] && ok "pod-history.json presente" || fail "pod-history.json ausente (graficos por pod)"
+  # idem node-history.json (graficos agregados da aba Kubernetes do no)
+  if [ ! -s "$K8S_DIR/node-history.json" ] && [ -x "$GEN" ]; then "$GEN" >/dev/null 2>&1 || true; fi
+  [ -s "$K8S_DIR/node-history.json" ] && ok "node-history.json presente" || fail "node-history.json ausente (graficos do no)"
   [ -f "$K8S_STATE_DIR/desired.json" ] && ok "desired.json persistente presente" || ok "desired.json ainda vazio (criado ao primeiro Stop/Scale)"
   [ -f "$K8S_STATE_DIR/notes.json" ] && ok "notes.json persistente presente" || ok "notes.json ainda vazio (criado no primeiro Notes save)"
   [ ! -e "$K8S_DIR/notes.json" ] && ok "diretorio estatico sem notes.json" || fail "notes.json no diretorio estatico (mover para $K8S_STATE_DIR)"
@@ -125,7 +128,7 @@ verify() {
   done
 
   echo "== HTTP via pveproxy =="
-  for p in /pve2/js/k8s/index.html /pve2/js/k8s/app-browser.js /pve2/js/k8s/status.json /pve2/js/k8s/apps.json; do
+  for p in /pve2/js/k8s/index.html /pve2/js/k8s/app-browser.js /pve2/js/k8s/status.json /pve2/js/k8s/apps.json /pve2/js/k8s/node-history.json; do
     code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -o /dev/null -w "%{http_code}" "https://$FQDN:8006$p")
     [ "$code" = 200 ] && ok "$p -> 200" || fail "$p -> $code (novo dir criado? systemctl restart pveproxy)"
   done
@@ -247,7 +250,7 @@ uninstall() {
   perl -MPVE::Cluster -e 'PVE::Cluster::broadcast_node_kv("k8snet-network", undef)' 2>/dev/null \
     && echo "  removido: snapshot k8snet do pmxcfs"
   if [ -d "$K8S_DIR" ]; then
-    rm -f "$K8S_DIR/index.html" "$K8S_DIR/status.json" "$K8S_DIR/apps.json" "$K8S_DIR/app-browser.js" "$K8S_DIR/history.json" "$K8S_DIR/pod-history.json"
+    rm -f "$K8S_DIR/index.html" "$K8S_DIR/status.json" "$K8S_DIR/apps.json" "$K8S_DIR/app-browser.js" "$K8S_DIR/history.json" "$K8S_DIR/pod-history.json" "$K8S_DIR/node-history.json"
     rmdir "$K8S_DIR" 2>/dev/null && echo "  removido: $K8S_DIR"
   fi
   # guard precisa sair ANTES de qualquer restauracao: se ficar ativo ele

@@ -86,7 +86,7 @@ a Folder View continua agrupando por tipo em “Kubernetes Applications”.
 | Arquivo | Papel |
 |---|---|
 | `patch_ui.py` | patches idempotentes: Services.pm (k3s), **Cluster.pm (tipo `k8sapp` em `/cluster/resources`)**, pvemanagerlib.js (aba, `typeDefaults`, `getTypeOrder`, `treeTypeToClass`, campo `k8sapp`, `startOnlyServices`) e index.html.tpl (script `app-browser.js`). Backups `*.bak-k8spoc`; reinicia `pvedaemon`/`pveproxy` só se ficaram velhos frente aos `.pm` |
-| `gen-status.py` | gera `status.json` **e `apps.json`** (apps, réplicas, requests/limits agregados, pods) a partir do k3s local; sem segredos; no host: `/usr/local/sbin/gen-k8s-status.py`, cron root a cada minuto |
+| `gen-status.py` | gera `status.json` **e `apps.json`** (apps, réplicas, requests/limits agregados, pods) e os históricos `history.json`/`pod-history.json`/`node-history.json` a partir do k3s local; sem segredos; no host: `/usr/local/sbin/gen-k8s-status.py`, cron root a cada minuto |
 | `app-browser.js` | widget `pveK8sAppBrowser` + `PVE.k8sapp.CmdMenu` — painel e menu de contexto da aplicação; janelas de escala, logs, describe e exclusão de pod |
 | `index.html` | painel da aba do nó, servido em `/pve2/js/k8s/index.html` |
 | `manage.sh` | `verify` (checagem completa, inclui a guarda do dispatcher e as 10 rotas de ação) e `uninstall` (rollback da UI) |
@@ -237,6 +237,14 @@ Cada pod do snapshot sobe em `/cluster/resources` como recurso `k8spod` com
 - Botão direito no pod: Console / Pod logs / Describe pod / View YAML /
   Delete pod (a validação de permissão do pod é a mesma do app).
 - `describe?pod=<nome>` restringe o kubectl ao pod (validado contra o snapshot).
+- Na aba **Kubernetes do nó PVE** (Server View → nó → Kubernetes), o card
+  **Consumo dos pods — agregado neste nó** desenha gráficos de CPU e memória
+  de TODOS os pods com `spec.nodeName == este host` (qualquer namespace,
+  somados a cada amostra do metrics-server), lendo `node-history.json`
+  (1 amostra/minuto, ~25 h; mesmo gerador `gen-k8s-status.py`). O cabeçalho
+  mostra o consumo atual contra a capacidade do nó e o número de pods
+  considerados; seletor de janela Hora/12h/Dia/Tudo. Em deploys antigos (sem
+  `node-history.json` ou com menos de 2 amostras) o card permanece oculto.
 
 Salvo a rota de gráficos acima, tudo reusa os endpoints `/nodes/{node}/k8sapp/...`, com o
 nó real viajando no campo `k8snode` do registro do pod.
