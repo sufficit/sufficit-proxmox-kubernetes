@@ -62,7 +62,7 @@ verify() {
   grep -q "itemId: 'kubernetes'," "$JS" && ok "aba Kubernetes no pvemanagerlib.js" || fail "aba Kubernetes ausente"
   grep -q "k3s: true," "$JS" && ok "k3s em startOnlyServices (protegido contra Stop pela UI)" || fail "startOnlyServices sem k3s"
   grep -q "k8sapp: {" "$JS" && ok "tipo k8sapp em typeDefaults (ícone/label na árvore)" || fail "typeDefaults sem k8sapp"
-  grep -q "src: '/pve2/js/k8s/index.html'," "$JS" && ok "iframe apontando para /pve2/js/k8s/" || fail "iframe ausente"
+  grep -qE "src: '/pve2/js/k8s/index\.html(\?k8spoc=[0-9a-f]+)?'," "$JS" && ok "iframe apontando para /pve2/js/k8s/ (cache-buster ok)" || fail "iframe ausente"
   grep -q "k8s/app-browser.js" "$TPL" && ok "index.html.tpl carrega app-browser.js" || fail "TPL sem app-browser.js"
   grep -q "Ext.ClassManager.get('PVE.k8sapp.CmdMenu')" "$JS" && ok "dispatcher createCmdMenu com guarda (menu k8sapp)" || fail "dispatcher CmdMenu sem k8sapp/guarda"
 

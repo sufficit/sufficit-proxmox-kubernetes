@@ -1107,7 +1107,7 @@ def _digest(path):
 # comportamento da UI muda, mesmo que os patches JS em si nao mudem (ex.: v4,
 # cuja mudanca foi no servidor). Sem isso o token pode voltar a um valor
 # antigo e clientes/proxies com copia velha sob essa URL seguem servindo-a.
-K8SPOC_JS_VERSION = "v5"
+K8SPOC_JS_VERSION = "v6"
 with open(JS, "ab") as _f:
     stamp = f"\n// k8spoc-js-{K8SPOC_JS_VERSION}\n".encode()
     _cur = open(JS, "rb").read()
@@ -1137,6 +1137,37 @@ if _new_tpl != _tpl:
     print(f"[ok] index.html.tpl: cache-busting k8spoc={CACHE_TOKEN}")
 else:
     print(f"[skip] index.html.tpl: cache-busting ja em k8spoc={CACHE_TOKEN}")
+
+# ---------- 5c) cache-busting do src do iframe do painel Kubernetes ----------
+# O painel da aba "Kubernetes" do no e um iframe com src FIXA
+# (/pve2/js/k8s/index.html). O navegador versiona POR URL: sem token, cada
+# deploy novo do painel continua servindo a copia ANTIGA do cache (o usuario
+# so ve a mudanca com Ctrl+F5 manual -- o sintoma exato do relato "nao estou
+# vendo os graficos no eveo"). Adicionamos um token derivado do conteudo real
+# do index.html do painel; ele muda a cada deploy e invalida o cache sozinho.
+# O token e reaplicado por regex idempotente, entao hosts JA patchados com
+# src antigo (sem token) sao reescritos no proximo patch_ui.py / guard.
+PANEL_INDEX = "/usr/share/pve-manager/js/k8s/index.html"
+# /pve2/js/k8s/index.html?k8spoc=<token>' + '  (o apos o token fecha a
+# string JS do autoEl.src; o regex so substitui a parte do token).
+IFRAME_TOKEN = hashlib.sha256(_digest(PANEL_INDEX).encode()).hexdigest()[:12] if os.path.exists(PANEL_INDEX) else None
+
+if IFRAME_TOKEN:
+    with open(JS, encoding="utf-8") as f:
+        _js = f.read()
+    _new_js = re.sub(
+        r"(src: '/pve2/js/k8s/index\.html)(?:\?k8spoc=[0-9a-f]+)?('\s*,)",
+        r"\1?k8spoc=" + IFRAME_TOKEN + r"\2",
+        _js,
+    )
+    if _new_js != _js:
+        with open(JS, "w", encoding="utf-8") as f:
+            f.write(_new_js)
+        print(f"[ok] pvemanagerlib.js: iframe cache-buster k8spoc={IFRAME_TOKEN}")
+    else:
+        print(f"[skip] pvemanagerlib.js: iframe cache-buster ja em k8spoc={IFRAME_TOKEN}")
+else:
+    print("[aviso] index.html do painel ausente; iframe cache-buster NAO aplicado")
 
 # ---------- 5b) guard: revalidar/reparar patches apos upgrade do pve-manager ----------
 # O pve-manager ENTREGA os arquivos patcheados (Services.pm, Cluster.pm,
