@@ -48,11 +48,12 @@ test.describe('Node Kubernetes tab - iframe cache-buster', () => {
     const panel = await page.request.get(`${pveBase}/pve2/js/k8s/index.html`);
     expect(panel.status(), 'index.html do painel GET status').toBe(200);
 
-    // Same digest the patch_ui.py computes: sha256 of the file bytes,
-    // first 12 hex chars. Compare against the on-disk digest by fetching
-    // the file through the same URL the browser would use.
+    // Same digest the patch_ui.py (secao 5c) computes: sha256 do HEXDIGEST
+    // do arquivo (double-hash), primeiros 12 hex. Compare against the file
+    // served through the same URL the browser would use.
     const crypto = require('crypto');
-    const digest = crypto.createHash('sha256').update(await panel.body()).digest('hex').slice(0, 12);
+    const inner = crypto.createHash('sha256').update(await panel.body()).digest('hex');
+    const digest = crypto.createHash('sha256').update(inner).digest('hex').slice(0, 12);
     expect(token, 'token do iframe == digest do index.html servido').toBe(digest);
   });
 });
