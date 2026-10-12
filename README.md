@@ -195,6 +195,17 @@ Manual: `k8s-ui-guard -v` (mostra saída; sempre loga).
   descartar uma sessão já aberta. O token anterior é removido no início de
   cada execução, senão a âncora do `index.html.tpl` não seria encontrada na
   segunda rodada e o patch abortaria antes de gravar o token novo.
+- **Cache do iframe do painel (v1.0.7):** o painel da aba Kubernetes do nó é
+  um iframe carregado com `src: '/pve2/js/k8s/index.html'`. Como o navegador
+  versiona por URL, um deploy novo do painel continuava servindo a cópia
+  antiga do cache até um Ctrl+F5 manual (o sintoma "não estou vendo os
+  gráficos" reportado no eveo). O `patch_ui.py` agora injeta um token
+  `?k8spoc=<sha256-12>` derivado do conteúdo real do `index.html` no `src`
+  do iframe dentro do `pvemanagerlib.js`; o token muda a cada deploy e
+  invalida o cache sozinho. A marca `K8SPOC_JS_VERSION` foi bumpada (v5→v6)
+  para forçar também a recarga do próprio `pvemanagerlib.js` em hosts já
+  patchados. O `manage.sh verify` passou a aceitar o token opcional no grep
+  do iframe.
 - **Layout do Summary:** a identidade da app (Kind, Namespace, Node) fica no
   `StatusView`, como no Summary do LXC. Não use um `component` solto entre o
   bloco `StatusView`/`Notes` e os gráficos: ele herda `minHeight: 360` do
