@@ -388,6 +388,8 @@ Ext.define('pve-rrd-k8sapp', {
         'maxcpu',
         { name: 'mem', defaultValue: null },
         'maxmem',
+        { name: 'disk', defaultValue: null },
+        'maxdisk',
         'podsReady',
         'podsTotal',
         'restarts',
@@ -500,14 +502,17 @@ Ext.define('PVE.k8s.AppStatusView', {
         },
         {
             // Disco efêmero somado dos pods da aplicação (kubelet
-            // stats/summary). Sem um "maxdisk" de guest, o gauge esconde-se
-            // (printBar:false) e a linha mostra só o total, como Restarts.
+            // stats/summary); o limite é a soma dos limits de ephemeral-storage
+            // ou, sem limite declarado, a capacidade do disco do nó.
             itemId: 'disk',
             iconCls: 'fa fa-hdd-o fa-fw',
             title: gettext('Disk usage'),
             valueField: 'disk',
-            printBar: false,
-            renderer: Proxmox.Utils.render_size,
+            maxField: 'maxdisk',
+            renderer: Proxmox.Utils.render_size_usage,
+            calculate: (used, max) => (max > 0 ? used / max : 0),
+            warningThreshold: 0.9,
+            criticalThreshold: 0.975,
         },
         {
             itemId: 'replicas',
@@ -1898,6 +1903,8 @@ Ext.define('PVE.k8s.AppBrowser', {
             cpu: app.cpu || 0,
             mem: app.mem || 0,
             maxmem: app.maxmem || 0,
+            disk: app.disk || 0,
+            maxdisk: app.maxdisk || 0,
             podsReady: app.podsReady || d.ready || 0,
             podsTotal: d.desired || app.podsTotal || 0,
             restarts: app.restarts || 0,
@@ -2092,6 +2099,12 @@ Ext.define('PVE.k8s.AppBrowser', {
             {
                 xtype: 'proxmoxRRDChart', title: gettext('Memory Usage'), columnWidth: 0.5,
                 pveSelNode: me.pveSelNode, fields: ['maxmem', 'mem'],
+                fieldTitles: [gettext('Total'), gettext('Used')], colors: ['#94ae0a', '#115fa6'],
+                unit: 'bytes', powerOfTwo: true, store: me.rrdstore,
+            },
+            {
+                xtype: 'proxmoxRRDChart', title: gettext('Disk Usage'), columnWidth: 0.5,
+                pveSelNode: me.pveSelNode, fields: ['maxdisk', 'disk'],
                 fieldTitles: [gettext('Total'), gettext('Used')], colors: ['#94ae0a', '#115fa6'],
                 unit: 'bytes', powerOfTwo: true, store: me.rrdstore,
             },
@@ -2423,6 +2436,17 @@ Ext.define('PVE.k8s.PodStatusView', {
             criticalThreshold: 0.975,
         },
         {
+            itemId: 'disk',
+            iconCls: 'fa fa-hdd-o fa-fw',
+            title: gettext('Disk usage'),
+            valueField: 'disk',
+            maxField: 'maxdisk',
+            renderer: Proxmox.Utils.render_size_usage,
+            calculate: (used, max) => (max > 0 ? used / max : 0),
+            warningThreshold: 0.9,
+            criticalThreshold: 0.975,
+        },
+        {
             xtype: 'box',
             height: 10,
         },
@@ -2588,6 +2612,12 @@ Ext.define('PVE.k8s.PodPanel', {
                         fieldTitles: [gettext('Total'), gettext('Used')], colors: ['#94ae0a', '#115fa6'],
                         unit: 'bytes', powerOfTwo: true, store: me.rrdstore,
                     },
+                    {
+                        xtype: 'proxmoxRRDChart', title: gettext('Disk Usage'), columnWidth: 0.5,
+                        pveSelNode: me.pveSelNode, fields: ['maxdisk', 'disk'],
+                        fieldTitles: [gettext('Total'), gettext('Used')], colors: ['#94ae0a', '#115fa6'],
+                        unit: 'bytes', powerOfTwo: true, store: me.rrdstore,
+                    },
                 ],
                 listeners: { resize: container => Proxmox.Utils.updateColumns(container) },
             }],
@@ -2648,6 +2678,8 @@ Ext.define('PVE.k8s.PodPanel', {
                 cpu: cpuMax ? (Number(pod.cpuMilli) || 0) / 1000 / cpuMax : 0,
                 mem: Number(pod.memBytes) || 0,
                 maxmem: Number(pod.memMax) || 0,
+                disk: Number(pod.diskBytes) || 0,
+                maxdisk: Number(pod.diskMax) || 0,
                 ip: pod.ip,
                 hostip: pod.hostip,
             };

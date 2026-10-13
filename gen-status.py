@@ -231,14 +231,40 @@ def build_status():
 
 
 # --------------------------------------------------------------- apoio a apps
-def node_capacity():
-    """(cpus, bytes de memória) do nó Kubernetes; fallback para o host."""
-    nodes = kc_json("get", "nodes", "-o", "json")
+_NODES_CACHE = None
+
+
+def k8s_nodes():
+    """Itens de `kubectl get nodes` (uma leitura por execucao)."""
+    global _NODES_CACHE
+    if _NODES_CACHE is None:
+        d = kc_json("get", "nodes", "-o", "json") or {}
+        _NODES_CACHE = d.get("items") or []
+    return _NODES_CACHE
+
+
+def node_capacity(name=None):
+    """(cpus, bytes de memória) do nó Kubernetes `name` (padrão: este host).
+
+    Seleciona o nó PELO NOME: em cluster multi-nó, items[0] é o primeiro da
+    lista (não este host) e todos os hosts exibiam a capacidade do mesmo nó.
+    Sem correspondência (nome do nó != hostname) com vários nós, cai para os
+    números do próprio host em vez de adivinhar outro nó.
+    """
+    name = name or NODENAME
+    items = k8s_nodes()
+    pick = next((n for n in items if (n.get("metadata") or {}).get("name") == name), None)
+    if pick is None and len(items) == 1:
+        pick = items[0]
     try:
-        cap = nodes["items"][0]["status"]["capacity"]
+        cap = pick["status"]["capacity"]
         return float(cap.get("cpu") or 0) or 1.0, mem_bytes(cap.get("memory"))
     except Exception:
-        return float(os.cpu_count() or 1), 0
+        try:
+            mem = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        except Exception:
+            mem = 0
+        return float(os.cpu_count() or 1), mem
 
 
 def pod_metrics():
@@ -253,51 +279,68 @@ def pod_metrics():
     return res
 
 
-def kubelet_disk():
-    """Disco efêmero via stats/summary do kubelet.
-
-    Retorna ((used_bytes, capacity_bytes), {(ns, pod): used_bytes}).
-    O disco do NÓ vem de node.fs (capacidade real do volume do kubelet, ex. o
-    root do host no k3s); o disco por POD vem de ephemeral-storage.usedBytes.
-    Tolerante a falha: ((0, 0), {}) quando a API não responde.
-    O resultado é memorizado por execução (build_apps e build_node_history
-    usam a mesma leitura; uma só chamada ao kubelet por minuto).
-    """
-    global _KUBELET_DISK_CACHE
-    if _KUBELET_DISK_CACHE is not None:
-        return _KUBELET_DISK_CACHE
-    _KUBELET_DISK_CACHE = _read_kubelet_disk()
-    return _KUBELET_DISK_CACHE
+def host_disk():
+    """(usado, total) em bytes do rootfs deste host, como o PVE (statfs de /)."""
+    try:
+        st = os.statvfs("/")
+        total = st.f_blocks * st.f_frsize
+        used = (st.f_blocks - st.f_bfree) * st.f_frsize
+        return int(used), int(total)
+    except Exception:
+        return 0, 0
 
 
 _KUBELET_DISK_CACHE = None
 
 
-def _read_kubelet_disk():
+def kubelet_disk():
+    """Disco efêmero por pod via stats/summary do kubelet de CADA nó.
+
+    Retorna ({(ns, pod): used_bytes}, {nó: capacidade_do_fs_em_bytes}).
+    Consulta todos os nós em paralelo (os pods de outros nós só aparecem no
+    kubelet deles). Tolerante a falha: um nó que não responde é ignorado.
+    Memorizado por execução (build_apps e build_node_history compartilham).
+    """
+    global _KUBELET_DISK_CACHE
+    if _KUBELET_DISK_CACHE is None:
+        _KUBELET_DISK_CACHE = _read_kubelet_disk()
+    return _KUBELET_DISK_CACHE
+
+
+def _read_node_summary(node):
     try:
         raw = kc_text(
-            "get", "--raw",
-            f"/api/v1/nodes/{NODENAME}/proxy/stats/summary",
-            timeout=20,
+            "get", "--raw", f"/api/v1/nodes/{node}/proxy/stats/summary", timeout=15
         )
-        d = json.loads(raw)
+        return node, json.loads(raw)
     except Exception:
-        return (0, 0), {}
-    node_fs = (d.get("node") or {}).get("fs") or {}
-    host = (
-        int(node_fs.get("usedBytes") or 0),
-        int(node_fs.get("capacityBytes") or 0),
-    )
-    pods = {}
-    for p in d.get("pods") or []:
-        ref = p.get("podRef") or {}
-        key = (ref.get("namespace"), ref.get("name"))
-        if not all(key):
+        return node, None
+
+
+def _read_kubelet_disk():
+    from concurrent.futures import ThreadPoolExecutor
+
+    names = [
+        (n.get("metadata") or {}).get("name") for n in k8s_nodes()
+    ] or [NODENAME]
+    names = [n for n in names if n]
+    pods, caps = {}, {}
+    with ThreadPoolExecutor(max_workers=max(1, min(8, len(names)))) as ex:
+        results = list(ex.map(_read_node_summary, names))
+    for node, d in results:
+        if not d:
             continue
-        used = (p.get("ephemeral-storage") or {}).get("usedBytes")
-        if used is not None:
-            pods[key] = int(used)
-    return host, pods
+        fs = (d.get("node") or {}).get("fs") or {}
+        caps[node] = int(fs.get("capacityBytes") or 0)
+        for p in d.get("pods") or []:
+            ref = p.get("podRef") or {}
+            key = (ref.get("namespace"), ref.get("name"))
+            if not all(key):
+                continue
+            used = (p.get("ephemeral-storage") or {}).get("usedBytes")
+            if used is not None:
+                pods[key] = int(used)
+    return pods, caps
 
 
 def cluster_dns():
@@ -363,7 +406,8 @@ def build_apps():
 
     node_cpus, node_mem = node_capacity()
     metrics = pod_metrics()
-    host_disk, pod_disk = kubelet_disk()
+    pod_disk, disk_caps = kubelet_disk()
+    host_cap = disk_caps.get(NODENAME) or host_disk()[1]
     dns_ip = cluster_dns()
     events = collect_events()
 
@@ -403,6 +447,7 @@ def build_apps():
                 "_cpu": 0.0,
                 "_mem": 0,
                 "_disk": 0,
+                "_disklim": 0,
                 "_start": None,
                 "_podlabels": {},
             }
@@ -537,6 +582,14 @@ def build_apps():
         cpu_m, mem_b = metrics.get((ns, pname), (0.0, 0))
         disk_b = pod_disk.get((ns, pname), 0)
         app["_disk"] += disk_b
+        # teto de disco do POD: limite ephemeral-storage declarado ou, sem
+        # limite, a capacidade do sistema de arquivos do no onde ele roda.
+        pod_node = spec.get("nodeName") or NODENAME
+        pod_lim_disk = sum(
+            mem_bytes(((c.get("resources") or {}).get("limits") or {}).get("ephemeral-storage"))
+            for c in (spec.get("containers") or [])
+        )
+        app["_disklim"] += pod_lim_disk
         # limites efetivos do POD (mesma regra da aplicacao: limite declarado
         # ou, sem limite, a capacidade do no) para os graficos por pod.
         pod_lim_cpu = sum(
@@ -570,6 +623,7 @@ def build_apps():
                 "cpuMilli": int(round(cpu_m)),
                 "memBytes": int(mem_b),
                 "diskBytes": int(disk_b),
+                "diskMax": int(pod_lim_disk) if pod_lim_disk > 0 else int(disk_caps.get(pod_node, 0)),
                 "cpuMax": round(pod_lim_cpu / 1000.0, 3) if pod_lim_cpu > 0 else node_cpus,
                 "memMax": int(pod_lim_mem) if pod_lim_mem > 0 else int(node_mem),
                 "starttime": start,
@@ -648,6 +702,7 @@ def build_apps():
         a["cpu"] = round(a["cpucores"] / a["cpus"], 6) if a["cpus"] else 0
         a["mem"] = a["_mem"]
         a["disk"] = a["_disk"]
+        a["maxdisk"] = a["_disklim"] if a["_disklim"] > 0 else host_cap
         a["uptime"] = max(0, now - a["_start"]) if a["_start"] else 0
         a["podsReady"] = sum(1 for p in a["pods"] if p["status"] == "Running")
         a["podsTotal"] = len(a["pods"])
@@ -671,6 +726,8 @@ def build_apps():
         a["restarts"] = a.pop("_restarts")
         a.pop("_cpu", None)
         a.pop("_mem", None)
+        a.pop("_disk", None)
+        a.pop("_disklim", None)
         a.pop("_start", None)
         a.pop("_podlabels", None)
         a["pods"].sort(key=lambda x: x["name"])
@@ -708,6 +765,8 @@ def build_history(apps, now):
                 a["podsReady"],
                 a["podsTotal"],
                 a["restarts"],
+                a["disk"],
+                a["maxdisk"],
             ]
         )
         series[key] = samples[-HISTORY_MAX:]
@@ -722,7 +781,7 @@ def build_pod_history(apps, now):
     """Serie temporal por POD, consumida pelo endpoint podrrddata.
 
     Chave = "<namespace>:<pod>" (nomes de pod sao unicos por namespace).
-    Amostra = [ts, milicores, bytes]. Os maximos (limite efetivo) viajam so na
+    Amostra = [ts, milicores, bytes_mem, bytes_disco]. Os maximos (limite efetivo) viajam so na
     entrada "max" do pod, porque mudam raramente e o grafico usa o valor atual.
     Pods que sumiram saem do arquivo (pod recriado = nome novo = serie nova).
     """
@@ -735,9 +794,11 @@ def build_pod_history(apps, now):
             key = f"{a['namespace']}:{p['name']}"
             alive.add(key)
             samples = series.get(key) or []
-            samples.append([now, p.get("cpuMilli", 0), p.get("memBytes", 0)])
+            samples.append(
+                [now, p.get("cpuMilli", 0), p.get("memBytes", 0), p.get("diskBytes", 0)]
+            )
             series[key] = samples[-POD_HISTORY_MAX:]
-            maxes[key] = [p.get("cpuMax", 0), p.get("memMax", 0)]
+            maxes[key] = [p.get("cpuMax", 0), p.get("memMax", 0), p.get("diskMax", 0)]
     for key in list(series):
         if key not in alive:
             del series[key]
@@ -751,19 +812,17 @@ def build_pod_history(apps, now):
 def build_node_history(apps, now):
     """Série temporal agregada do NÓ (aba Kubernetes do nó no PVE).
 
-    Soma CPU/memória de TODOS os pods com spec.nodeName == este host (qualquer
-    namespace), conforme reportado pelo metrics-server. Amostra única
-    [ts, milicores, bytes, bytes_de_disco]; os máximos (capacidade do nó)
-    viajam na chave "max" porque o gráfico usa o valor atual. Simétrico ao
-    pod-history: 1 amostra/minuto, janela HISTORY_MAX.
-
-    O disco é a soma do ephemeral-storage dos pods deste nó (kubelet
-    stats/summary); o teto é a capacidade real do volume do kubelet
-    (node.fs.capacityBytes), não o limite de suma dos pods.
+    CPU/memória: soma de TODOS os pods com spec.nodeName == este host
+    (metrics-server), contra a capacidade DESTE nó. Disco: uso real do rootfs
+    do host (statfs de /, o mesmo número do "Disk usage" do PVE) e, à parte, a
+    soma do ephemeral-storage dos pods. Amostra única
+    [ts, milicores, bytes_mem, bytes_disco_host, bytes_disco_pods]; os máximos
+    (capacidade do nó) viajam em "max" = [milicores, bytes_mem, bytes_disco].
+    1 amostra/minuto, janela HISTORY_MAX.
     """
     cpu_m = 0.0
     mem_b = 0
-    disk_b = 0
+    pods_disk = 0
     n_pods = 0
     for a in apps:
         for p in a["pods"]:
@@ -772,22 +831,18 @@ def build_node_history(apps, now):
             n_pods += 1
             cpu_m += p.get("cpuMilli", 0)
             mem_b += p.get("memBytes", 0)
-            disk_b += p.get("diskBytes", 0)
+            pods_disk += p.get("diskBytes", 0)
     cpus, maxmem = node_capacity()
-    (_, diskcap), _pods = kubelet_disk()
+    used, total = host_disk()
     hist = read_json(OUT_NODE_HISTORY, {})
-    # amostras antigas (pre-v1.0.8) tem 3 campos: completa com disco 0 para a
-    # serie ter formato uniforme [ts, cpu, mem, disk]
-    samples = [
-        s + [0] * (4 - len(s)) if len(s) < 4 else s
-        for s in (hist.get("series") or [])
-    ]
-    samples.append([now, int(round(cpu_m)), int(mem_b), int(disk_b)])
+    # amostras antigas (3 ou 4 campos) completadas com zeros: formato uniforme
+    samples = [s + [0] * (5 - len(s)) if len(s) < 5 else s for s in (hist.get("series") or [])]
+    samples.append([now, int(round(cpu_m)), int(mem_b), int(used), int(pods_disk)])
     write_json(
         OUT_NODE_HISTORY,
         {
             "generated": now,
-            "max": [cpus * 1000.0, maxmem, int(diskcap)],
+            "max": [cpus * 1000.0, maxmem, int(total)],
             "node": NODENAME,
             "pods": n_pods,
             "series": samples[-HISTORY_MAX:],
