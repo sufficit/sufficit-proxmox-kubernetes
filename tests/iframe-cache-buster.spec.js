@@ -35,9 +35,9 @@ test.describe('Node Kubernetes tab - iframe cache-buster', () => {
     // The k8s tab must exist and its iframe src must point at the panel with
     // a cache-buster token. Pre-v1.0.7 deploys have the bare src and are
     // expected to skip (legacy path), exactly like the other specs.
-    const m = js.match(/src: '\/pve2\/js\/k8s\/index\.html(\?k8spoc=([0-9a-f]+))?',\s*\n\s*tag: 'iframe',|tag: 'iframe',\s*\n\s*src: '\/pve2\/js\/k8s\/index\.html(\?k8spoc=([0-9a-f]+))?',\s*,/);
+    const m = js.match(/tag: 'iframe',\s*src: '\/pve2\/js\/k8s\/index\.html(?:\?k8spoc=([0-9a-f]+))?'/);
     test.skip(!m, 'aba Kubernetes ausente no pvemanagerlib.js servido');
-    const token = m[2] || m[4];
+    const token = m[1];
     test.skip(!token, 'iframe sem cache-buster (deploy pre-v1.0.7): Ctrl+F5 manual ainda necessario');
 
     // The token must match the digest of the CURRENT panel index.html

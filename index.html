@@ -37,15 +37,18 @@
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 4px 18px; }
   .k { color: var(--muted); }
   .err { color: var(--bad); }
-  /* Uso dos pods — padrão Proxmox (pveNodeStatus): linhas "XX% of Y" com
-     mini-gauge à esquerda + grade RRD abaixo, como o summary do nó PVE. */
-  .us { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
-  .us-ico { width: 16px; text-align: center; color: var(--muted); flex: 0 0 auto; }
-  .us-lab { flex: 1; }
-  .us-lab b { font-weight: 600; }
-  .us-lab .pct { color: var(--muted); margin-left: 6px; }
+  /* Uso dos pods — padrão Proxmox (pmxInfoWidget): título à esquerda, valor
+     "xx.xx% (A of B)" à direita e barra fina de 5px abaixo, como o summary do nó. */
+  .us { padding: 4px 0 6px; }
+  .us-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .us-lab { white-space: nowrap; }
+  .us-ico { display: inline-block; width: 18px; text-align: center; color: var(--muted); }
   .us-cur { text-align: right; white-space: nowrap; }
-  .us-gauge { flex: 0 0 auto; }
+  .us-bar { height: 5px; margin-top: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  .us-fill { height: 100%; background: var(--accent); border-radius: 2px; }
+  .us-fill.warn { background: #f0ad4e; }
+  .us-fill.crit { background: #d9534f; }
+  .us-extra { color: var(--muted); font-size: 12px; margin: 2px 0 0 18px; }
   .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; margin-top: 10px; }
   @media (max-width: 880px) { .charts { grid-template-columns: 1fr; } }
   .chart { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; }
@@ -214,38 +217,35 @@ async function loadStatus() {
 
 // ------------------------------------------------- gráficos do nó (node-history)
 const TF = { minutes: 60 };
-function fmtMi(m) { if (m >= 1000) { const c = m / 1000; return (c >= 10 ? Math.round(c) : c.toFixed(1).replace('.', ',')) + ' núcleo' + (c > 1 ? 's' : ''); } return Math.round(m) + 'm'; }
+function fmtMi(m) { if (m >= 1000) { const c = m / 1000; return (c >= 10 ? Math.round(c) : c.toFixed(1)) + ' CPU(s)'; } return Math.round(m) + 'm'; }
+// Proxmox.Utils.format_size: B sem casas; demais unidades com 2 casas ("62.70 GiB").
 function fmtBytes(b) {
-  if (b <= 0) return '0';
-  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  if (!(b > 0)) return '0 B';
+  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
   let i = 0, v = b;
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return (i >= 3 ? v.toFixed(1).replace('.', ',') : Math.round(v)) + ' ' + u[i];
+  return (i === 0 ? Math.round(v) : v.toFixed(2)) + ' ' + u[i];
+}
+// "0.00% of 64 CPU(s)" (render_cpu_usage) e "12.34% (7.74 GiB of 62.70 GiB)" (render_size_usage).
+function cpuText(milli, maxMilli) {
+  const cpus = maxMilli / 1000;
+  return maxMilli > 0
+    ? ((milli * 100) / maxMilli).toFixed(2) + '% of ' + (Number.isInteger(cpus) ? cpus : cpus.toFixed(1)) + ' CPU(s)'
+    : fmtMi(milli);
+}
+function sizeText(val, max) {
+  return max > 0 ? ((val * 100) / max).toFixed(2) + '% (' + fmtBytes(val) + ' of ' + fmtBytes(max) + ')' : fmtBytes(val);
 }
 function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
-// Mini-gauge semicircular no padrão Proxmox (GaugeWidget): arco colorido por
-// threshold + "trilho" cinza, ex.: <svg> com stroke-dasharray.
-function gaugeSVG(pct) {
-  const p = Math.max(0, Math.min(100, Math.round(pct)));
-  const col = p >= 90 ? '#d9534f' : p >= 75 ? '#f0ad4e' : '#5cb85c';
-  const R = 15, C = Math.PI * R; // semicircunferência
-  const on = (p / 100) * C;
-  return `<svg class="us-gauge" width="34" height="20" viewBox="0 0 34 20">
-    <path d="M2 18 A 15 15 0 0 1 32 18" fill="none" stroke="${css('--line') || '#d9dcde'}" stroke-width="5"/>
-    <path d="M2 18 A 15 15 0 0 1 32 18" fill="none" stroke="${col}" stroke-width="5"
-          stroke-dasharray="${on.toFixed(1)} ${C.toFixed(1)}" stroke-linecap="butt"/>
-  </svg>`;
-}
-
-// Uma linha de uso no padrão pveNodeStatus: ícone + "Label  xx%" + valor atual
-// + mini-gauge à direita.
+// Uma linha de uso no padrão pmxInfoWidget: ícone + título, valor à direita e
+// barra fina de 5px (thresholds do PVE: 75% aviso, 90% crítico).
 function usageRow(icon, label, pct, curText) {
+  const p = Math.max(0, Math.min(100, pct));
+  const cls = p >= 90 ? 'crit' : p >= 75 ? 'warn' : '';
   return `<div class="us">
-    <span class="us-ico">${icon}</span>
-    <span class="us-lab"><b>${label}</b><span class="pct">${Math.round(pct)}%</span></span>
-    <span class="us-cur">${curText}</span>
-    ${gaugeSVG(pct)}
+    <div class="us-head"><span class="us-lab"><span class="us-ico">${icon}</span>${label}</span><span class="us-cur">${curText}</span></div>
+    <div class="us-bar"><div class="us-fill ${cls}" style="width:${p.toFixed(2)}%"></div></div>
   </div>`;
 }
 
@@ -317,25 +317,27 @@ async function loadUsage() {
     const max = h.max || [0, 0, 0];
     const cpuCur = last[1], cpuMax = max[0];
     const memCur = last[2], memMax = max[1];
-    const diskCur = last[3] || 0, diskMax = max[2] || 0;
-    const cpuTxt = fmtMi(cpuCur) + (cpuMax ? ' de ' + fmtMi(cpuMax) : '');
-    const memTxt = (memMax ? Math.round((memCur / memMax) * 100) + '% (' : '') +
-                   fmtBytes(memCur) + (memMax ? ' de ' + fmtBytes(memMax) + ')' : '');
-    const diskTxt = (diskMax ? Math.round((diskCur / diskMax) * 100) + '% (' : '') +
-                    fmtBytes(diskCur) + (diskMax ? ' de ' + fmtBytes(diskMax) + ')' : '');
+    const diskCur = last[3] || 0, diskMax = max[2] || 0;   // disco REAL do host (statfs de /)
+    const podsDisk = last[4] || 0;                          // ephemeral-storage somado dos pods
+    const cpuTxt = cpuText(cpuCur, cpuMax);
+    const memTxt = sizeText(memCur, memMax);
+    const diskTxt = sizeText(diskCur, diskMax);
     document.getElementById('cpu-now').textContent = cpuTxt;
     document.getElementById('mem-now').textContent = memTxt;
     document.getElementById('disk-now').textContent = diskTxt;
     document.getElementById('us-rows').innerHTML =
-      usageRow('🖥️', 'CPU usage', cpuMax ? (cpuCur / cpuMax) * 100 : 0, cpuTxt) +
-      usageRow('🧠', 'Memory usage', memMax ? (memCur / memMax) * 100 : 0, memTxt) +
-      usageRow('💾', 'Disk usage', diskMax ? (diskCur / diskMax) * 100 : 0, diskTxt);
+      usageRow('\uD83D\uDDA5\uFE0F', 'CPU usage', cpuMax ? (cpuCur / cpuMax) * 100 : 0, cpuTxt) +
+      usageRow('\uD83E\uDDE0', 'Memory usage', memMax ? (memCur / memMax) * 100 : 0, memTxt) +
+      usageRow('\uD83D\uDCBE', 'Disk usage', diskMax ? (diskCur / diskMax) * 100 : 0, diskTxt) +
+      `<div class="us-extra" id="pods-disk">Disco ef\u00eamero dos pods: ${fmtBytes(podsDisk)}</div>`;
     drawChart(document.getElementById('cpu-chart'), series, 1, cpuMax, fmtMi);
     drawChart(document.getElementById('mem-chart'), series, 2, memMax, fmtBytes);
+    // amostras antigas (pre-v1.0.10) nao trazem o disco do host: ficam de fora do grafico
+    const dseries = series.filter(s => s[3] > 0);
     const diskChart = document.getElementById('disk-chart').closest('.chart');
-    if (diskMax) {
+    if (diskMax && dseries.length >= 2) {
       diskChart.style.display = '';
-      drawChart(document.getElementById('disk-chart'), series, 3, diskMax, fmtBytes);
+      drawChart(document.getElementById('disk-chart'), dseries, 3, diskMax, fmtBytes);
     } else {
       diskChart.style.display = 'none';
     }

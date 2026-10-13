@@ -1104,6 +1104,9 @@ __PACKAGE__->register_method({
             push @result, {
                 time => $s->[0], cpu => $s->[1], maxcpu => $s->[2],
                 mem => $s->[3], maxmem => $s->[4],
+                # amostras anteriores a v1.0.10 nao trazem disco: undef -> null
+                # (o grafico mostra lacuna em vez de um zero falso)
+                disk => $s->[8], maxdisk => $s->[9],
                 netin => 0, netout => 0,
                 pressurecpusome => 0, pressurecpufull => 0,
             };
@@ -1143,13 +1146,13 @@ __PACKAGE__->register_method({
         }
         raise_param_exc({ pod => 'Pod does not belong to this application' }) if !$allowed;
 
-        # pod-history.json: { max => { "ns:pod" => [cpuLimitCores, memLimitBytes] },
-        #                     series => { "ns:pod" => [[ts, milliCPU, memBytes], ...] } }
+        # pod-history.json: { max => { "ns:pod" => [cpuLimitCores, memLimitBytes, diskMaxBytes] },
+        #                     series => { "ns:pod" => [[ts, milliCPU, memBytes, diskBytes], ...] } }
         # 1 sample/minute, kept for POD_HISTORY_MAX samples (see gen-status.py).
         my $key = ($app->{namespace} // '') . ':' . $param->{pod};
         my $data = read_json_file($pod_history_file) || {};
         my $samples = $data->{series}{$key} || [];
-        my ($maxcpu, $maxmem) = @{ $data->{max}{$key} || [0, 0] };
+        my ($maxcpu, $maxmem, $maxdisk) = @{ $data->{max}{$key} || [0, 0, 0] };
         my %tail_of = (hour => 70, day => 1440, week => 10080, month => 43200, year => 525600);
         my $tail = $tail_of{ $param->{timeframe} // 'hour' } // 1440;
         my @slice = scalar(@$samples) > $tail ? @$samples[-$tail .. -1] : @$samples;
@@ -1162,6 +1165,7 @@ __PACKAGE__->register_method({
             push @result, {
                 time => $s->[0], cpu => $cpu, maxcpu => $maxcpu + 0,
                 mem => $s->[2], maxmem => $maxmem + 0,
+                disk => $s->[3], maxdisk => ($maxdisk // 0) + 0,
             };
         }
         return \@result;

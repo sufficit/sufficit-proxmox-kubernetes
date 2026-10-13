@@ -88,21 +88,22 @@ test.describe('Node Kubernetes tab - aggregated usage charts', () => {
     }), ids);
     painted.forEach((n, i) => expect(n, `${ids[i]} canvas painted`).toBeGreaterThan(50));
 
-    // Linhas de uso no padrão Proxmox (pveNodeStatus): rótulo + % + gauge.
+    // Linhas de uso no padrão Proxmox (pmxInfoWidget): título + valor + barra fina.
     const rows = page.locator('#us-rows .us');
     await expect(rows).toHaveCount(3);
     await expect(rows.nth(0)).toContainText('CPU usage');
     await expect(rows.nth(1)).toContainText('Memory usage');
     await expect(rows.nth(2)).toContainText('Disk usage');
-    // Cada linha tem um mini-gauge SVG pintado.
-    await expect(page.locator('#us-rows .us-gauge')).toHaveCount(3);
+    // Cada linha tem a barra fina de 5px (preenchimento proporcional ao uso).
+    await expect(page.locator('#us-rows .us-bar')).toHaveCount(3);
+    await expect(page.locator('#us-rows .us-fill')).toHaveCount(3);
 
     // Header shows current usage against node capacity.
-    await expect(page.locator('#cpu-now')).toContainText(/m$|n[úu]cleo/);
-    await expect(page.locator('#mem-now')).toContainText(/(Ki|Mi|Gi|Ti)B/);
-    if (ids.length === 3) {
-      await expect(page.locator('#disk-now')).toContainText(/(Ki|Mi|Gi|Ti)B/);
-    }
+    // Mesmo formato do Proxmox: "0.00% of 64 CPU(s)" e "12.34% (7.74 GiB of 62.70 GiB)".
+    await expect(page.locator('#cpu-now')).toContainText(/^\d+\.\d{2}% of [\d.]+ CPU\(s\)$|m$/);
+    await expect(page.locator('#mem-now')).toContainText(/^\d+\.\d{2}% \(.+ of .+\)$/);
+    await expect(page.locator('#disk-now')).toContainText(/^\d+\.\d{2}% \(.+ (B|KiB|MiB|GiB|TiB) of .+\)$/);
+    await expect(page.locator('#pods-disk')).toContainText('Disco efêmero dos pods');
     if (Number.isFinite(hist.pods) && hist.pods > 0) {
       await expect(page.locator('#pods-count')).toContainText(`${hist.pods} pods`);
     }
