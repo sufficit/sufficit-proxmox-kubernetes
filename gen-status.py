@@ -260,7 +260,20 @@ def kubelet_disk():
     O disco do NÓ vem de node.fs (capacidade real do volume do kubelet, ex. o
     root do host no k3s); o disco por POD vem de ephemeral-storage.usedBytes.
     Tolerante a falha: ((0, 0), {}) quando a API não responde.
+    O resultado é memorizado por execução (build_apps e build_node_history
+    usam a mesma leitura; uma só chamada ao kubelet por minuto).
     """
+    global _KUBELET_DISK_CACHE
+    if _KUBELET_DISK_CACHE is not None:
+        return _KUBELET_DISK_CACHE
+    _KUBELET_DISK_CACHE = _read_kubelet_disk()
+    return _KUBELET_DISK_CACHE
+
+
+_KUBELET_DISK_CACHE = None
+
+
+def _read_kubelet_disk():
     try:
         raw = kc_text(
             "get", "--raw",
@@ -761,9 +774,14 @@ def build_node_history(apps, now):
             mem_b += p.get("memBytes", 0)
             disk_b += p.get("diskBytes", 0)
     cpus, maxmem = node_capacity()
-    _, (_, diskcap) = kubelet_disk()
+    (_, diskcap), _pods = kubelet_disk()
     hist = read_json(OUT_NODE_HISTORY, {})
-    samples = (hist.get("series") or [])
+    # amostras antigas (pre-v1.0.8) tem 3 campos: completa com disco 0 para a
+    # serie ter formato uniforme [ts, cpu, mem, disk]
+    samples = [
+        s + [0] * (4 - len(s)) if len(s) < 4 else s
+        for s in (hist.get("series") or [])
+    ]
     samples.append([now, int(round(cpu_m)), int(mem_b), int(disk_b)])
     write_json(
         OUT_NODE_HISTORY,
