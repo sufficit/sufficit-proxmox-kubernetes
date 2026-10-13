@@ -36,11 +36,15 @@ test.describe('Node Kubernetes tab - aggregated usage charts', () => {
     expect(typeof h.pods, 'pods count').toBe('number');
     expect(Array.isArray(h.series), 'series array').toBe(true);
     for (const s of h.series.slice(-5)) {
-      expect(s.length, 'sample = [ts, cpuMilli, memBytes, diskBytes]').toBe(4);
+      // v1.0.10: [ts, cpuMilli, memBytes, discoDoHost, efemeroDosPods]; hosts
+      // em v1.0.6-v1.0.9 ainda gravam 3 ou 4 campos.
+      expect(s.length, 'sample = [ts, cpuMilli, memBytes, disk(, podsDisk)]').toBeGreaterThanOrEqual(3);
+      expect(s.length).toBeLessThanOrEqual(5);
       expect(s[0], 'sample ts > 0').toBeGreaterThan(0);
       expect(s[1], 'sample cpuMilli >= 0').toBeGreaterThanOrEqual(0);
       expect(s[2], 'sample memBytes >= 0').toBeGreaterThanOrEqual(0);
-      expect(s[3], 'sample diskBytes >= 0').toBeGreaterThanOrEqual(0);
+      if (s.length >= 4) expect(s[3], 'sample diskBytes >= 0').toBeGreaterThanOrEqual(0);
+      if (s.length === 5) expect(s[4], 'sample podsDisk >= 0').toBeGreaterThanOrEqual(0);
     }
   });
 

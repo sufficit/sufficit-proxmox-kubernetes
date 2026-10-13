@@ -241,7 +241,9 @@ test.describe('Kubernetes pods nested under real hosts (k8spod)', () => {
           containers: !!panel.down('#pod-containers'),
         };
       });
-      expect(view.bars).toEqual(['cpu', 'memory']);
+      // v1.0.10 acrescenta a barra de disco; hosts anteriores mostram so cpu+memoria.
+      expect(view.bars.slice(0, 2)).toEqual(['cpu', 'memory']);
+      expect(['', 'disk']).toContain(view.bars.slice(2).join(','));
       expect(view.title).toContain(podName);
       expect(view.containers, 'containers grid beside the status view').toBe(true);
     }
@@ -279,12 +281,14 @@ test.describe('Kubernetes pods nested under real hosts (k8spod)', () => {
       const charts = panel.query('proxmoxRRDChart');
       return {
         charts: charts.map((c) => c.getTitle()),
-        sameStore: charts.length === 2 && charts[0].getStore() === charts[1].getStore(),
+        sameStore: charts.length >= 2 && charts.every((c) => c.getStore() === charts[0].getStore()),
         rrdurl: panel.rrdstore && panel.rrdstore.rrdurl,
         selector: panel.query('proxmoxRRDTypeSelector').length,
       };
     });
-    expect(info.charts).toEqual(['CPU Usage', 'Memory Usage']);
+    // v1.0.10 acrescenta o grafico de disco; hosts anteriores tem so CPU+memoria.
+    expect(info.charts.slice(0, 2)).toEqual(['CPU Usage', 'Memory Usage']);
+    expect(['', 'Disk Usage']).toContain(info.charts.slice(2).join(','));
     expect(info.sameStore, 'both charts read the same pod RRD store').toBe(true);
     expect(info.rrdurl).toMatch(new RegExp(`/k8sapp/[^/]+/pods/${podName}/rrddata$`));
     expect(info.selector, 'timeframe selector present').toBe(1);
@@ -299,7 +303,9 @@ test.describe('Kubernetes pods nested under real hosts (k8spod)', () => {
     const rows = (await resp.json()).data;
     expect(Array.isArray(rows)).toBe(true);
     if (rows.length) {
-      for (const k of ['time', 'cpu', 'mem', 'maxmem', 'maxcpu']) {
+      const keys = ['time', 'cpu', 'mem', 'maxmem', 'maxcpu'];
+      if (info.charts.length === 3) keys.push('disk', 'maxdisk');
+      for (const k of keys) {
         expect(rows[rows.length - 1], `sample has ${k}`).toHaveProperty(k);
       }
     }
