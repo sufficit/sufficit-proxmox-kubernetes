@@ -253,6 +253,40 @@ def pod_metrics():
     return res
 
 
+def kubelet_disk():
+    """Disco efêmero via stats/summary do kubelet.
+
+    Retorna ((used_bytes, capacity_bytes), {(ns, pod): used_bytes}).
+    O disco do NÓ vem de node.fs (capacidade real do volume do kubelet, ex. o
+    root do host no k3s); o disco por POD vem de ephemeral-storage.usedBytes.
+    Tolerante a falha: ((0, 0), {}) quando a API não responde.
+    """
+    try:
+        raw = kc_text(
+            "get", "--raw",
+            f"/api/v1/nodes/{NODENAME}/proxy/stats/summary",
+            timeout=20,
+        )
+        d = json.loads(raw)
+    except Exception:
+        return (0, 0), {}
+    node_fs = (d.get("node") or {}).get("fs") or {}
+    host = (
+        int(node_fs.get("usedBytes") or 0),
+        int(node_fs.get("capacityBytes") or 0),
+    )
+    pods = {}
+    for p in d.get("pods") or []:
+        ref = p.get("podRef") or {}
+        key = (ref.get("namespace"), ref.get("name"))
+        if not all(key):
+            continue
+        used = (p.get("ephemeral-storage") or {}).get("usedBytes")
+        if used is not None:
+            pods[key] = int(used)
+    return host, pods
+
+
 def cluster_dns():
     """IP do serviço de DNS do cluster (coredns/kube-dns)."""
     svcs = kc_json("get", "svc", "-n", "kube-system", "-o", "json") or {"items": []}
@@ -316,6 +350,7 @@ def build_apps():
 
     node_cpus, node_mem = node_capacity()
     metrics = pod_metrics()
+    host_disk, pod_disk = kubelet_disk()
     dns_ip = cluster_dns()
     events = collect_events()
 
@@ -354,6 +389,7 @@ def build_apps():
                 "_restarts": 0,
                 "_cpu": 0.0,
                 "_mem": 0,
+                "_disk": 0,
                 "_start": None,
                 "_podlabels": {},
             }
@@ -486,6 +522,8 @@ def build_apps():
                 app["volumes"].append(entry)
 
         cpu_m, mem_b = metrics.get((ns, pname), (0.0, 0))
+        disk_b = pod_disk.get((ns, pname), 0)
+        app["_disk"] += disk_b
         # limites efetivos do POD (mesma regra da aplicacao: limite declarado
         # ou, sem limite, a capacidade do no) para os graficos por pod.
         pod_lim_cpu = sum(
@@ -518,6 +556,7 @@ def build_apps():
                 # valores numericos para pod-history.json (graficos do pod)
                 "cpuMilli": int(round(cpu_m)),
                 "memBytes": int(mem_b),
+                "diskBytes": int(disk_b),
                 "cpuMax": round(pod_lim_cpu / 1000.0, 3) if pod_lim_cpu > 0 else node_cpus,
                 "memMax": int(pod_lim_mem) if pod_lim_mem > 0 else int(node_mem),
                 "starttime": start,
@@ -595,6 +634,7 @@ def build_apps():
         a["cpucores"] = round(a["_cpu"] / 1000.0, 4)
         a["cpu"] = round(a["cpucores"] / a["cpus"], 6) if a["cpus"] else 0
         a["mem"] = a["_mem"]
+        a["disk"] = a["_disk"]
         a["uptime"] = max(0, now - a["_start"]) if a["_start"] else 0
         a["podsReady"] = sum(1 for p in a["pods"] if p["status"] == "Running")
         a["podsTotal"] = len(a["pods"])
@@ -700,12 +740,17 @@ def build_node_history(apps, now):
 
     Soma CPU/memória de TODOS os pods com spec.nodeName == este host (qualquer
     namespace), conforme reportado pelo metrics-server. Amostra única
-    [ts, milicores, bytes]; os máximos (capacidade do nó) viajam na chave
-    "max" porque o gráfico usa o valor atual. Simétrico ao pod-history:
-    1 amostra/minuto, janela HISTORY_MAX.
+    [ts, milicores, bytes, bytes_de_disco]; os máximos (capacidade do nó)
+    viajam na chave "max" porque o gráfico usa o valor atual. Simétrico ao
+    pod-history: 1 amostra/minuto, janela HISTORY_MAX.
+
+    O disco é a soma do ephemeral-storage dos pods deste nó (kubelet
+    stats/summary); o teto é a capacidade real do volume do kubelet
+    (node.fs.capacityBytes), não o limite de suma dos pods.
     """
     cpu_m = 0.0
     mem_b = 0
+    disk_b = 0
     n_pods = 0
     for a in apps:
         for p in a["pods"]:
@@ -714,15 +759,17 @@ def build_node_history(apps, now):
             n_pods += 1
             cpu_m += p.get("cpuMilli", 0)
             mem_b += p.get("memBytes", 0)
+            disk_b += p.get("diskBytes", 0)
     cpus, maxmem = node_capacity()
+    _, (_, diskcap) = kubelet_disk()
     hist = read_json(OUT_NODE_HISTORY, {})
     samples = (hist.get("series") or [])
-    samples.append([now, int(round(cpu_m)), int(mem_b)])
+    samples.append([now, int(round(cpu_m)), int(mem_b), int(disk_b)])
     write_json(
         OUT_NODE_HISTORY,
         {
             "generated": now,
-            "max": [cpus * 1000.0, maxmem],
+            "max": [cpus * 1000.0, maxmem, int(diskcap)],
             "node": NODENAME,
             "pods": n_pods,
             "series": samples[-HISTORY_MAX:],

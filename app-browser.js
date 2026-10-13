@@ -499,6 +499,17 @@ Ext.define('PVE.k8s.AppStatusView', {
             criticalThreshold: 0.975,
         },
         {
+            // Disco efêmero somado dos pods da aplicação (kubelet
+            // stats/summary). Sem um "maxdisk" de guest, o gauge esconde-se
+            // (printBar:false) e a linha mostra só o total, como Restarts.
+            itemId: 'disk',
+            iconCls: 'fa fa-hdd-o fa-fw',
+            title: gettext('Disk usage'),
+            valueField: 'disk',
+            printBar: false,
+            renderer: Proxmox.Utils.render_size,
+        },
+        {
             itemId: 'replicas',
             iconCls: 'fa fa-cubes fa-fw',
             title: gettext('Replicas'),
