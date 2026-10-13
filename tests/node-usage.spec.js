@@ -29,16 +29,18 @@ test.describe('Node Kubernetes tab - aggregated usage charts', () => {
     const h = await resp.json();
     expect(typeof h.generated, 'generated epoch').toBe('number');
     expect(h.node, 'node name').toBeTruthy();
-    expect(Array.isArray(h.max) && h.max.length === 2, 'max = [cpuMilli, bytes]').toBe(true);
+    expect(Array.isArray(h.max) && h.max.length === 3, 'max = [cpuMilli, memBytes, diskBytes]').toBe(true);
     expect(h.max[0], 'cpu capacity > 0').toBeGreaterThan(0);
     expect(h.max[1], 'mem capacity > 0').toBeGreaterThan(0);
+    expect(h.max[2], 'disk capacity >= 0').toBeGreaterThanOrEqual(0);
     expect(typeof h.pods, 'pods count').toBe('number');
     expect(Array.isArray(h.series), 'series array').toBe(true);
     for (const s of h.series.slice(-5)) {
-      expect(s.length, 'sample = [ts, cpuMilli, bytes]').toBe(3);
+      expect(s.length, 'sample = [ts, cpuMilli, memBytes, diskBytes]').toBe(4);
       expect(s[0], 'sample ts > 0').toBeGreaterThan(0);
       expect(s[1], 'sample cpuMilli >= 0').toBeGreaterThanOrEqual(0);
       expect(s[2], 'sample memBytes >= 0').toBeGreaterThanOrEqual(0);
+      expect(s[3], 'sample diskBytes >= 0').toBeGreaterThanOrEqual(0);
     }
   });
 
@@ -67,23 +69,40 @@ test.describe('Node Kubernetes tab - aggregated usage charts', () => {
     await page.goto(`${pveBase}/pve2/js/k8s/index.html`, { waitUntil: 'domcontentloaded' });
     await expect(page.locator('#usage-card')).toBeVisible({ timeout: 30_000 });
 
-    // Two charts, both painted (non-blank canvas).
+    // Three charts, all painted (non-blank canvas). O disco pode estar
+    // oculto em deploys legados sem kubelet stats/summary (diskMax = 0).
     await expect(page.locator('#cpu-chart')).toBeVisible();
     await expect(page.locator('#mem-chart')).toBeVisible();
-    const painted = await page.evaluate(() => ['cpu-chart', 'mem-chart'].map((id) => {
+    const ids = ['cpu-chart', 'mem-chart'];
+    if (Number.isFinite(hist.max?.[2]) && hist.max[2] > 0) {
+      await expect(page.locator('#disk-chart')).toBeVisible();
+      ids.push('disk-chart');
+    }
+    const painted = await page.evaluate((chartIds) => chartIds.map((id) => {
       const c = document.getElementById(id);
       const g = c.getContext('2d');
       const d = g.getImageData(0, 0, c.width, c.height).data;
       let n = 0;
       for (let i = 3; i < d.length; i += 4) if (d[i] !== 0) n++;
       return n;
-    }));
-    expect(painted[0], 'cpu canvas painted').toBeGreaterThan(50);
-    expect(painted[1], 'mem canvas painted').toBeGreaterThan(50);
+    }), ids);
+    painted.forEach((n, i) => expect(n, `${ids[i]} canvas painted`).toBeGreaterThan(50));
+
+    // Linhas de uso no padrão Proxmox (pveNodeStatus): rótulo + % + gauge.
+    const rows = page.locator('#us-rows .us');
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(0)).toContainText('CPU usage');
+    await expect(rows.nth(1)).toContainText('Memory usage');
+    await expect(rows.nth(2)).toContainText('Disk usage');
+    // Cada linha tem um mini-gauge SVG pintado.
+    await expect(page.locator('#us-rows .us-gauge')).toHaveCount(3);
 
     // Header shows current usage against node capacity.
     await expect(page.locator('#cpu-now')).toContainText(/m$|n[úu]cleo/);
     await expect(page.locator('#mem-now')).toContainText(/(Ki|Mi|Gi|Ti)B/);
+    if (ids.length === 3) {
+      await expect(page.locator('#disk-now')).toContainText(/(Ki|Mi|Gi|Ti)B/);
+    }
     if (Number.isFinite(hist.pods) && hist.pods > 0) {
       await expect(page.locator('#pods-count')).toContainText(`${hist.pods} pods`);
     }

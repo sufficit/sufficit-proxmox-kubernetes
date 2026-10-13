@@ -37,8 +37,22 @@
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 4px 18px; }
   .k { color: var(--muted); }
   .err { color: var(--bad); }
-  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+  /* Uso dos pods — padrão Proxmox (pveNodeStatus): linhas "XX% of Y" com
+     mini-gauge à esquerda + grade RRD abaixo, como o summary do nó PVE. */
+  .us { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
+  .us-ico { width: 16px; text-align: center; color: var(--muted); flex: 0 0 auto; }
+  .us-lab { flex: 1; }
+  .us-lab b { font-weight: 600; }
+  .us-lab .pct { color: var(--muted); margin-left: 6px; }
+  .us-cur { text-align: right; white-space: nowrap; }
+  .us-gauge { flex: 0 0 auto; }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; margin-top: 10px; }
   @media (max-width: 880px) { .charts { grid-template-columns: 1fr; } }
+  .chart { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; }
+  .chart-head { display: flex; justify-content: space-between; align-items: baseline;
+                 font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .chart-head b { color: var(--fg); font-weight: 600; text-transform: none; letter-spacing: 0; }
+  .chart-head .now { color: var(--fg); }
   .chart-head { display: flex; justify-content: space-between; align-items: baseline; margin: 2px 0 4px; }
   .chart-head span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
   canvas { width: 100%; height: 140px; display: block; }
@@ -72,14 +86,19 @@
 
   <div class="card" id="usage-card" hidden>
     <h2>Consumo dos pods &mdash; agregado neste nó <span id="pods-count" class="k" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div id="us-rows"></div>
     <div class="charts">
-      <div>
-        <div class="chart-head"><span>CPU</span><span id="cpu-now" style="text-transform:none;letter-spacing:0"></span></div>
-        <canvas id="cpu-chart" width="600" height="280"></canvas>
+      <div class="chart">
+        <div class="chart-head"><b>CPU</b><span class="now" id="cpu-now"></span></div>
+        <canvas id="cpu-chart" height="140"></canvas>
       </div>
-      <div>
-        <div class="chart-head"><span>Memória</span><span id="mem-now" style="text-transform:none;letter-spacing:0"></span></div>
-        <canvas id="mem-chart" width="600" height="280"></canvas>
+      <div class="chart">
+        <div class="chart-head"><b>Memória</b><span class="now" id="mem-now"></span></div>
+        <canvas id="mem-chart" height="140"></canvas>
+      </div>
+      <div class="chart">
+        <div class="chart-head"><b>Disco</b><span class="now" id="disk-now"></span></div>
+        <canvas id="disk-chart" height="140"></canvas>
       </div>
     </div>
     <div class="tfbar" id="tfbar">
@@ -205,6 +224,31 @@ function fmtBytes(b) {
 }
 function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
+// Mini-gauge semicircular no padrão Proxmox (GaugeWidget): arco colorido por
+// threshold + "trilho" cinza, ex.: <svg> com stroke-dasharray.
+function gaugeSVG(pct) {
+  const p = Math.max(0, Math.min(100, Math.round(pct)));
+  const col = p >= 90 ? '#d9534f' : p >= 75 ? '#f0ad4e' : '#5cb85c';
+  const R = 15, C = Math.PI * R; // semicircunferência
+  const on = (p / 100) * C;
+  return `<svg class="us-gauge" width="34" height="20" viewBox="0 0 34 20">
+    <path d="M2 18 A 15 15 0 0 1 32 18" fill="none" stroke="${css('--line') || '#d9dcde'}" stroke-width="5"/>
+    <path d="M2 18 A 15 15 0 0 1 32 18" fill="none" stroke="${col}" stroke-width="5"
+          stroke-dasharray="${on.toFixed(1)} ${C.toFixed(1)}" stroke-linecap="butt"/>
+  </svg>`;
+}
+
+// Uma linha de uso no padrão pveNodeStatus: ícone + "Label  xx%" + valor atual
+// + mini-gauge à direita.
+function usageRow(icon, label, pct, curText) {
+  return `<div class="us">
+    <span class="us-ico">${icon}</span>
+    <span class="us-lab"><b>${label}</b><span class="pct">${Math.round(pct)}%</span></span>
+    <span class="us-cur">${curText}</span>
+    ${gaugeSVG(pct)}
+  </div>`;
+}
+
 function drawChart(canvas, series, idx, max, fmt) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || 600, h = canvas.clientHeight || 140;
@@ -270,11 +314,31 @@ async function loadUsage() {
     card.hidden = false;
     document.getElementById('pods-count').textContent = h.pods != null ? '· ' + h.pods + ' pods' : '';
     const last = series[series.length - 1];
-    const max = h.max || [0, 0];
-    document.getElementById('cpu-now').textContent = fmtMi(last[1]) + (max[0] ? ' de ' + fmtMi(max[0]) : '');
-    document.getElementById('mem-now').textContent = fmtBytes(last[2]) + (max[1] ? ' de ' + fmtBytes(max[1]) : '');
-    drawChart(document.getElementById('cpu-chart'), series, 1, max[0], fmtMi);
-    drawChart(document.getElementById('mem-chart'), series, 2, max[1], fmtBytes);
+    const max = h.max || [0, 0, 0];
+    const cpuCur = last[1], cpuMax = max[0];
+    const memCur = last[2], memMax = max[1];
+    const diskCur = last[3] || 0, diskMax = max[2] || 0;
+    const cpuTxt = fmtMi(cpuCur) + (cpuMax ? ' de ' + fmtMi(cpuMax) : '');
+    const memTxt = (memMax ? Math.round((memCur / memMax) * 100) + '% (' : '') +
+                   fmtBytes(memCur) + (memMax ? ' de ' + fmtBytes(memMax) + ')' : '');
+    const diskTxt = (diskMax ? Math.round((diskCur / diskMax) * 100) + '% (' : '') +
+                    fmtBytes(diskCur) + (diskMax ? ' de ' + fmtBytes(diskMax) + ')' : '');
+    document.getElementById('cpu-now').textContent = cpuTxt;
+    document.getElementById('mem-now').textContent = memTxt;
+    document.getElementById('disk-now').textContent = diskTxt;
+    document.getElementById('us-rows').innerHTML =
+      usageRow('🖥️', 'CPU usage', cpuMax ? (cpuCur / cpuMax) * 100 : 0, cpuTxt) +
+      usageRow('🧠', 'Memory usage', memMax ? (memCur / memMax) * 100 : 0, memTxt) +
+      usageRow('💾', 'Disk usage', diskMax ? (diskCur / diskMax) * 100 : 0, diskTxt);
+    drawChart(document.getElementById('cpu-chart'), series, 1, cpuMax, fmtMi);
+    drawChart(document.getElementById('mem-chart'), series, 2, memMax, fmtBytes);
+    const diskChart = document.getElementById('disk-chart').closest('.chart');
+    if (diskMax) {
+      diskChart.style.display = '';
+      drawChart(document.getElementById('disk-chart'), series, 3, diskMax, fmtBytes);
+    } else {
+      diskChart.style.display = 'none';
+    }
   } catch (e) {
     /* node-history ainda indisponível: card permanece oculto */
   }
