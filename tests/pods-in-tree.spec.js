@@ -61,15 +61,32 @@ async function expandAll(page) {
 }
 
 // A arvore usa buffered rendering: so as linhas visiveis existem no DOM. Os
-// grupos ordenam depois do pseudo-host Kubernetes (74 apps acima), entao o
-// grupo do host e seus pods ficam abaixo da dobra -- rola o NO ate a view
-// renderizar a linha, exatamente como o usuario veria ao rolar a lateral.
+// grupos ordenam depois do pseudo-host Kubernetes (74 apps acima) e dos hosts
+// anteriores (no eveo o grupo do host e o ULTIMO, apos ~100 linhas), entao o
+// grupo do host e seus pods ficam abaixo da dobra. view.scrollIntoView(node)
+// espera um elemento DOM e nao move a arvore; o caminho correto e
+// Ext.panel.Table#ensureVisible(record), que aciona o buffered renderer. O
+// poll do rstore pode re-renderizar a arvore, entao repete ate a linha existir.
 async function scrollNodeIntoView(page, nodeId) {
-  await page.evaluate((id) => {
-    const tree = Ext.ComponentQuery.query('pveResourceTree')[0];
-    const node = tree.getRootNode().findChild('id', id, true);
-    if (node && tree.getView().scrollIntoView) tree.getView().scrollIntoView(node);
-  }, nodeId);
+  for (let i = 0; i < 15; i++) {
+    const rendered = await page.evaluate((id) => {
+      const tree = Ext.ComponentQuery.query('pveResourceTree')[0];
+      const node = tree && tree.getRootNode().findChild('id', id, true);
+      if (!node) return false;
+      const view = tree.getView();
+      if (view.getNode(node)) return true;
+      try {
+        tree.ensureVisible(node, { focus: false, select: false, animate: false });
+      } catch (e) {
+        const idx = view.getStore().indexOf(node);
+        const br = view.bufferedRenderer;
+        if (idx >= 0 && br) br.scrollTo(idx, false);
+      }
+      return !!view.getNode(node);
+    }, nodeId);
+    if (rendered) break;
+    await page.waitForTimeout(400);
+  }
   await page.waitForTimeout(400);
 }
 

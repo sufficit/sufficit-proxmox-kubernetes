@@ -401,7 +401,10 @@ test.describe('Kubernetes application context menu', () => {
     await expect(
       page.locator('.x-grid-item', { hasText: scopedId }).first(),
     ).toBeVisible({ timeout: 30000 });
-    const taskTab = await page.evaluate(() => {
+    // O store do grid e criado/reconfigurado pelo binding do viewmodel: logo
+    // apos abrir a aba o proxy pode ainda ser o padrao (sem getUrl). Le a URL
+    // com poll ate o proxy remoto estar instalado.
+    const readTaskTab = () => page.evaluate(() => {
       const browser = Ext.ComponentQuery.query('pveK8sAppBrowser')[0];
       if (!browser) return { ok: false, reason: 'no pveK8sAppBrowser' };
       const tab = browser.down('#tasks');
@@ -415,9 +418,17 @@ test.describe('Kubernetes application context menu', () => {
         ok: true,
         url: vm.get('url'),
         preFilter,
-        requestUrl: tab.getStore().getProxy().getUrl(),
+        requestUrl: (() => {
+          const proxy = tab.getStore().getProxy();
+          return proxy && typeof proxy.getUrl === 'function' ? proxy.getUrl() : null;
+        })(),
       };
     });
+    await expect.poll(async () => (await readTaskTab()).requestUrl, {
+      message: 'task grid store proxy exposes the app tasks URL',
+      timeout: 30000,
+    }).toContain(`/k8sapp/${app.appid}/tasks`);
+    const taskTab = await readTaskTab();
     expect(taskTab.ok, `Task History tab is proxmoxNodeTasks (${taskTab.reason})`).toBe(true);
     expect(taskTab.url).toContain(`/k8sapp/${app.appid}/tasks`);
     expect(taskTab.preFilter).toEqual({ source: 'all' });
