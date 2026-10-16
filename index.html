@@ -315,7 +315,22 @@ function drawChart(canvas, series, idx, max, fmt) {
   g.fillText(fmt(last[idx]), Math.min(px(last[0]) + 4, w - padR - 40), Math.max(py(last[idx]) - 4, padT + 8));
 }
 
+// v1.0.11: quando a aba do no ja tem os graficos NATIVOS do PVE (pveK8sNodeUsage,
+// no documento pai, mesma origem), este card de canvas fica oculto -- evita
+// graficos duplicados. Hosts/abas antigos (sem o painel) seguem com o card.
+function nativeChartsInParent() {
+  try {
+    const P = window.parent;
+    return P !== window && !!(P.Ext && P.Ext.ComponentQuery &&
+      P.Ext.ComponentQuery.query("pveK8sNodeUsage").length);
+  } catch (e) { return false; }
+}
+
 async function loadUsage() {
+  if (nativeChartsInParent()) {
+    document.getElementById("usage-card").hidden = true;
+    return;
+  }
   try {
     const h = await api('/pve2/js/k8s/node-history.json?_=' + Date.now());
     let series = h.series || [];

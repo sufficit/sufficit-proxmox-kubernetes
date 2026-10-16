@@ -24,6 +24,7 @@ use base qw(PVE::RESTHandler);
 my $apps_file = '/usr/share/pve-manager/js/k8s/apps.json';
 my $history_file = '/usr/share/pve-manager/js/k8s/history.json';
 my $pod_history_file = '/usr/share/pve-manager/js/k8s/pod-history.json';
+my $node_history_file = '/usr/share/pve-manager/js/k8s/node-history.json';
 my $notes_file = '/usr/share/pve-manager/js/k8s/notes.json';
 # User state lives with the other PVE state (jobs/, pkgupdates/): /var/lib is
 # writable by pvedaemon (root, where the protected PUT runs) and its
@@ -1109,6 +1110,57 @@ __PACKAGE__->register_method({
                 disk => $s->[8], maxdisk => $s->[9],
                 netin => 0, netout => 0,
                 pressurecpusome => 0, pressurecpufull => 0,
+            };
+        }
+        return \@result;
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'noderrddata',
+    # Serie agregada do NO (soma dos pods com nodeName == este host), no mesmo
+    # formato RRD dos guests: alimenta os proxmoxRRDChart nativos da aba
+    # Kubernetes do no. Path literal: o RESTHandler casa literais antes de
+    # {appid}, e appids reais sempre contem ':' (namespace:nome).
+    path => 'noderrddata',
+    method => 'GET',
+    protected => 1,
+    permissions => { check => ['perm', '/nodes/{node}', ['Sys.Audit']] },
+    description => 'Read aggregated Kubernetes pod usage of this node (RRD format).',
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            timeframe => { type => 'string', enum => ['hour', 'day', 'week', 'month', 'year'], optional => 1 },
+            cf => { type => 'string', enum => ['AVERAGE', 'MAX'], optional => 1 },
+        },
+    },
+    returns => { type => 'array', items => { type => 'object', properties => {} } },
+    code => sub {
+        my ($param) = @_;
+        # node-history.json: { max => [cpuMilli, memBytes, diskBytes],
+        #   series => [[ts, cpuMilli, memBytes, hostDiskBytes, podsDiskBytes], ...] }
+        # (amostras pre-v1.0.10 tem 3 ou 4 campos: o que falta vira null)
+        my $data = read_json_file($node_history_file) || {};
+        my $samples = $data->{series} || [];
+        my ($maxcpu_m, $maxmem, $maxdisk) = @{ $data->{max} || [0, 0, 0] };
+        my %tail_of = (hour => 70, day => 1440, week => 10080, month => 43200, year => 525600);
+        my $tail = $tail_of{ $param->{timeframe} // 'hour' } // 1440;
+        my @slice = scalar(@$samples) > $tail ? @$samples[-$tail .. -1] : @$samples;
+        my @result;
+        for my $s (@slice) {
+            my $disk = $s->[3];
+            $disk = undef if defined($disk) && $disk <= 0;
+            push @result, {
+                time => $s->[0],
+                # fracao da capacidade do no (o model multiplica por 100), igual
+                # ao CPU usage nativo do no no PVE
+                cpu => $maxcpu_m ? ($s->[1] // 0) / $maxcpu_m : undef,
+                maxcpu => $maxcpu_m ? $maxcpu_m / 1000 : undef,
+                mem => $s->[2], maxmem => $maxmem,
+                disk => $disk, maxdisk => $maxdisk,
+                podsdisk => $s->[4],
+                netin => 0, netout => 0,
             };
         }
         return \@result;

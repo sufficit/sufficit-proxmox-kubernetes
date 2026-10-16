@@ -2748,3 +2748,60 @@ Ext.define('PVE.k8s.PodPanel', {
         }, 10);
     },
 });
+
+/*
+ * Aba "Kubernetes" do NO: graficos NATIVOS do PVE (Proxmox.data.RRDStore +
+ * proxmoxRRDChart + proxmoxRRDTypeSelector), os mesmos do Summary do no/VM/LXC.
+ * Fonte: /nodes/{node}/k8sapp/noderrddata (node-history.json agregado: soma dos
+ * pods com nodeName == este host). O proxmoxRRDChart auto-escala o eixo Y, tem
+ * tooltip, zoom/undo e seletor Hora/Dia/Semana/Mes/Ano -- substitui os canvas
+ * desenhados a mao do iframe (que ficam ocultos quando este painel existe).
+ */
+Ext.define('PVE.k8s.NodeUsage', {
+    extend: 'Ext.panel.Panel',
+    alias: 'widget.pveK8sNodeUsage',
+
+    title: gettext('Kubernetes pods - usage on this node'),
+    iconCls: 'fa fa-area-chart',
+    tbar: ['->', { xtype: 'proxmoxRRDTypeSelector' }],
+    bodyPadding: 0,
+
+    initComponent: function () {
+        let me = this;
+        let node = me.nodename || (me.pveSelNode && me.pveSelNode.data && me.pveSelNode.data.node);
+        if (!node) {
+            throw 'no node name specified';
+        }
+        me.rrdstore = Ext.create('Proxmox.data.RRDStore', {
+            rrdurl: `/api2/json/nodes/${encodeURIComponent(node)}/k8sapp/noderrddata`,
+            model: 'pve-rrd-k8sapp',
+        });
+        let chart = (cfg) => Ext.apply({
+            xtype: 'proxmoxRRDChart', columnWidth: 1 / 3, padding: 5, height: 300,
+            pveSelNode: me.pveSelNode, store: me.rrdstore,
+        }, cfg);
+        me.items = [{
+            xtype: 'container', itemId: 'itemcontainer', layout: { type: 'column' },
+            minWidth: 700,
+            items: [
+                chart({
+                    title: gettext('CPU usage'), itemId: 'k8s-node-cpu', fields: ['cpu'],
+                    fieldTitles: [gettext('CPU usage')], unit: 'percent',
+                }),
+                chart({
+                    title: gettext('Memory usage'), itemId: 'k8s-node-mem', fields: ['mem'],
+                    fieldTitles: [gettext('Used')], colors: ['#115fa6'],
+                    unit: 'bytes', powerOfTwo: true,
+                }),
+                chart({
+                    title: gettext('Disk usage'), itemId: 'k8s-node-disk', fields: ['disk'],
+                    fieldTitles: [gettext('Used')], colors: ['#115fa6'],
+                    unit: 'bytes', powerOfTwo: true,
+                }),
+            ],
+        }];
+        me.callParent();
+        me.rrdstore.startUpdate();
+        me.on('destroy', me.rrdstore.stopUpdate, me.rrdstore);
+    },
+});

@@ -721,6 +721,36 @@ patch(
     marker="itemId: 'kubernetes',",
 )
 
+# ---------- 3a-bis) graficos NATIVOS do PVE na aba Kubernetes do no ----------
+# Acima do iframe entra o painel pveK8sNodeUsage (app-browser.js): RRDStore +
+# proxmoxRRDChart + RRDTypeSelector, os mesmos graficos do Summary do no. O
+# iframe continua abaixo (servicos/rede/apps) e esconde o card de canvas
+# quando detecta este painel no pai. Patch separado (marker proprio) para
+# alcancar hosts que ja tem a aba antiga; guarda de classe para nao quebrar o
+# painel do no se o app-browser.js estiver em cache antigo.
+patch(
+    JS,
+    "                    itemId: 'kubernetes',\n"
+    "                    layout: 'fit',\n"
+    "                    items: [\n"
+    "                        {\n"
+    "                            xtype: 'component',\n",
+    "                    itemId: 'kubernetes',\n"
+    "                    // POC k8s (k8s-poc): graficos nativos acima do iframe\n"
+    "                    layout: { type: 'vbox', align: 'stretch' },\n"
+    "                    scrollable: 'y',\n"
+    "                    items: [\n"
+    "                        ...(Ext.ClassManager.get('PVE.k8s.NodeUsage')\n"
+    "                            ? [{ xtype: 'pveK8sNodeUsage', pveSelNode: me.pveSelNode, height: 390 }]\n"
+    "                            : []),\n"
+    "                        {\n"
+    "                            xtype: 'component',\n"
+    "                            flex: 1,\n"
+    "                            minHeight: 600,\n",
+    "pvemanagerlib.js: graficos nativos na aba Kubernetes do no",
+    marker="xtype: 'pveK8sNodeUsage'",
+)
+
 # ---------- 3b) submenu Datacenter -> Kubernetes -> Network ----------
 # Mesmo padrao do grupo SDN (header com itemId proprio + filhos com
 # groups:[itemId]; ver PVE.panel.Config.insertNodes). O item "kubernetes" e
@@ -1107,7 +1137,7 @@ def _digest(path):
 # comportamento da UI muda, mesmo que os patches JS em si nao mudem (ex.: v4,
 # cuja mudanca foi no servidor). Sem isso o token pode voltar a um valor
 # antigo e clientes/proxies com copia velha sob essa URL seguem servindo-a.
-K8SPOC_JS_VERSION = "v6"
+K8SPOC_JS_VERSION = "v7"
 with open(JS, "ab") as _f:
     stamp = f"\n// k8spoc-js-{K8SPOC_JS_VERSION}\n".encode()
     _cur = open(JS, "rb").read()

@@ -60,6 +60,7 @@ verify() {
   grep -q "k8sapp: 'pveK8sAppBrowser'," "$JS" && ok "k8sapp abre painel pveK8sAppBrowser" || fail "treeTypeToClass sem k8sapp"
   grep -q "enum => \['vm', 'storage', 'node', 'sdn', 'k8sapp', 'k8spod'\]" "$CLUSTER_PM" && ok "Cluster.pm: filtro type aceita k8sapp+k8spod" || fail "Cluster.pm: enum sem k8sapp/k8spod"
   grep -q "itemId: 'kubernetes'," "$JS" && ok "aba Kubernetes no pvemanagerlib.js" || fail "aba Kubernetes ausente"
+  grep -q "xtype: 'pveK8sNodeUsage'" "$JS" && grep -q "PVE.k8s.NodeUsage" "$K8S_DIR/app-browser.js" 2>/dev/null && ok "aba Kubernetes do no com graficos nativos (pveK8sNodeUsage)" || fail "graficos nativos da aba Kubernetes ausentes"
   grep -q "k3s: true," "$JS" && ok "k3s em startOnlyServices (protegido contra Stop pela UI)" || fail "startOnlyServices sem k3s"
   grep -q "k8sapp: {" "$JS" && ok "tipo k8sapp em typeDefaults (ícone/label na árvore)" || fail "typeDefaults sem k8sapp"
   grep -qE "src: '/pve2/js/k8s/index\.html(\?k8spoc=[0-9a-f]+)?'," "$JS" && ok "iframe apontando para /pve2/js/k8s/ (cache-buster ok)" || fail "iframe ausente"
