@@ -261,14 +261,29 @@ function drawChart(canvas, series, idx, max, fmt) {
   const padL = 46, padR = 8, padT = 8, padB = 18;
   const iw = w - padL - padR, ih = h - padT - padB;
   const t0 = series[0][0], t1 = series[series.length - 1][0] || 1;
-  const vmax = Math.max(max, ...series.map(s => s[idx])) * 1.15 || 1;
+  // Auto-escala (como o proxmoxRRDChart): o eixo Y acompanha os dados da janela,
+  // nao a capacidade total do no. Com 0..capacidade, um consumo de ~1-2% virava
+  // uma linha reta colada no zero. A capacidade continua no texto "x% of N".
+  const vals = series.map(s => Number(s[idx]) || 0);
+  let dmin = Math.min(...vals), dmax = Math.max(...vals);
+  let span = dmax - dmin;
+  if (span <= dmax * 0.02) span = Math.max(dmax * 0.1, 1);   // serie quase constante
+  let lo = Math.max(0, dmin - span * 0.25), hi = dmax + span * 0.25;
+  const step0 = (hi - lo) / 4;
+  const mag = Math.pow(10, Math.floor(Math.log10(step0 || 1)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= step0) || step0;
+  lo = Math.floor(lo / step) * step;
+  hi = lo + step * 4;
+  if (hi < dmax) hi = Math.ceil(dmax / step) * step;
+  const vmin = lo, vmax = hi > lo ? hi : lo + 1;
+  void max;
 
   g.strokeStyle = line; g.fillStyle = muted; g.font = '10px sans-serif';
   for (let i = 0; i <= 4; i++) {
     const y = padT + ih - (ih * i) / 4;
     g.beginPath(); g.moveTo(padL, y); g.lineTo(w - padR, y); g.stroke();
     g.textAlign = 'right';
-    g.fillText(fmt((vmax * i) / 4), padL - 6, Math.min(y + 3, h - 4));
+    g.fillText(fmt(vmin + ((vmax - vmin) * i) / 4), padL - 6, Math.min(y + 3, h - 4));
   }
   g.textAlign = 'center';
   const tlabels = [t0, (t0 + t1) / 2, t1];
@@ -282,7 +297,7 @@ function drawChart(canvas, series, idx, max, fmt) {
   });
 
   const px = (t) => padL + ((t - t0) / Math.max(1, t1 - t0)) * iw;
-  const py = (v) => padT + ih - (v / vmax) * ih;
+  const py = (v) => padT + ih - ((v - vmin) / (vmax - vmin)) * ih;
 
   const grad = g.createLinearGradient(0, padT, 0, padT + ih);
   grad.addColorStop(0, accent + '33'); grad.addColorStop(1, accent + '05');
