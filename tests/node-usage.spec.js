@@ -104,7 +104,7 @@ test.describe('Node Kubernetes tab - aggregated usage charts', () => {
 
     // Header shows current usage against node capacity.
     // Mesmo formato do Proxmox: "0.00% of 64 CPU(s)" e "12.34% (7.74 GiB of 62.70 GiB)".
-    await expect(page.locator('#cpu-now')).toContainText(/^\d+\.\d{2}% of [\d.]+ CPU\(s\)$|m$/);
+    await expect(page.locator('#cpu-now')).toContainText(/^\d+\.\d{2}% of [\d.]+ CPU\(s\)$|^\d+m$/);
     await expect(page.locator('#mem-now')).toContainText(/^\d+\.\d{2}% \(.+ of .+\)$/);
     await expect(page.locator('#disk-now')).toContainText(/^\d+\.\d{2}% \(.+ (B|KiB|MiB|GiB|TiB) of .+\)$/);
     await expect(page.locator('#pods-disk')).toContainText('Disco efêmero dos pods');
