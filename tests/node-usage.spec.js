@@ -118,4 +118,67 @@ test.describe('Node Kubernetes tab - aggregated usage charts', () => {
     await page.locator('#tfbar button[data-min="60"]').click();
     await expect(page.locator('#tfbar button[data-min="60"]')).toHaveClass(/on/);
   });
+
+  // v1.0.11: graficos NATIVOS do PVE (proxmoxRRDChart) na aba Kubernetes do no,
+  // alimentados por /nodes/{node}/k8sapp/noderrddata. Deploys anteriores nao
+  // tem o endpoint nem o painel: skip (caminho legacy, card de canvas acima).
+  test('GET k8sapp/noderrddata serves RRD rows for the node', async ({ page }) => {
+    await login(page);
+    const h = await (await page.request.get(`${pveBase}/pve2/js/k8s/node-history.json`)).json().catch(() => null);
+    test.skip(!h || !h.node, 'node-history.json ausente');
+    const resp = await page.request.get(
+      `${pveBase}/api2/json/nodes/${encodeURIComponent(h.node)}/k8sapp/noderrddata?timeframe=hour&cf=AVERAGE`);
+    test.skip(resp.status() === 501 || resp.status() === 404 || resp.status() === 400,
+      'deploy sem endpoint noderrddata (pre-v1.0.11)');
+    expect(resp.status(), 'noderrddata GET status').toBe(200);
+    const rows = (await resp.json()).data;
+    expect(Array.isArray(rows), 'rows array').toBe(true);
+    expect(rows.length, 'at least one sample').toBeGreaterThan(0);
+    const r = rows[rows.length - 1];
+    expect(r.time).toBeGreaterThan(0);
+    expect(r.cpu, 'cpu fraction of node capacity').toBeGreaterThanOrEqual(0);
+    expect(r.cpu).toBeLessThanOrEqual(1.5);
+    expect(r.maxcpu, 'maxcpu in cores').toBeGreaterThan(0);
+    expect(r.mem).toBeGreaterThanOrEqual(0);
+    expect(r.maxmem).toBeGreaterThan(0);
+  });
+
+  test('node Kubernetes tab shows native PVE RRD charts', async ({ page }) => {
+    await login(page);
+    const h = await (await page.request.get(`${pveBase}/pve2/js/k8s/node-history.json`)).json().catch(() => null);
+    test.skip(!h || !h.node, 'node-history.json ausente');
+    const js = await (await page.request.get(`${pveBase}/pve2/js/pvemanagerlib.js`)).text();
+    test.skip(!js.includes("xtype: 'pveK8sNodeUsage'"), 'deploy sem graficos nativos (pre-v1.0.11)');
+
+    await page.goto(`${pveBase}/`, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('body')).toContainText('Datacenter', { timeout: 30000 });
+    await expect.poll(() => page.evaluate(() => !!Ext.ComponentQuery.query('pveResourceTree')[0]),
+      { timeout: 30000 }).toBe(true);
+    await page.evaluate((node) => {
+      Ext.ComponentQuery.query('pveResourceTree')[0].selectById(`node/${node}`);
+    }, h.node);
+    await expect.poll(() => page.evaluate(() => !!Ext.ComponentQuery.query('pveNodeConfig')[0]),
+      { timeout: 30000, message: 'node config panel' }).toBe(true);
+    await page.evaluate(() => {
+      const cfg = Ext.ComponentQuery.query('pveNodeConfig')[0];
+      if (typeof cfg.activateCard === 'function') cfg.activateCard('kubernetes');
+      else cfg.setActiveTab('kubernetes');
+    });
+
+    await expect.poll(() => page.evaluate(() => {
+      const p = Ext.ComponentQuery.query('pveK8sNodeUsage')[0];
+      if (!p || !p.isVisible(true)) return -1;
+      return p.query('proxmoxRRDChart').filter((c) => c.isVisible(true)).length;
+    }), { timeout: 30000, message: 'visible native RRD charts' }).toBe(3);
+
+    // O RRDStore carrega amostras e o chart tem series com dados.
+    await expect.poll(() => page.evaluate(() => {
+      const p = Ext.ComponentQuery.query('pveK8sNodeUsage')[0];
+      return p && p.rrdstore ? p.rrdstore.getCount() : 0;
+    }), { timeout: 30000, message: 'rrdstore records' }).toBeGreaterThan(0);
+
+    // O card de canvas do iframe fica oculto (sem graficos duplicados).
+    const frame = page.frameLocator('iframe[src*="/pve2/js/k8s/index.html"]');
+    await expect(frame.locator('#usage-card')).toBeHidden({ timeout: 30000 });
+  });
 });
