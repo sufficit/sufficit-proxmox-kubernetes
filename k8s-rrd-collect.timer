@@ -1,0 +1,9 @@
+[Unit]
+Description=Collect node-local Kubernetes history every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:30
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

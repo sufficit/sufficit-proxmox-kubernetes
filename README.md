@@ -87,6 +87,7 @@ a Folder View continua agrupando por tipo em “Kubernetes Applications”.
 |---|---|
 | `patch_ui.py` | patches idempotentes: Services.pm (k3s), **Cluster.pm (tipo `k8sapp` em `/cluster/resources`)**, pvemanagerlib.js (aba, `typeDefaults`, `getTypeOrder`, `treeTypeToClass`, campo `k8sapp`, `startOnlyServices`) e index.html.tpl (script `app-browser.js`). Backups `*.bak-k8spoc`; reinicia `pvedaemon`/`pveproxy` só se ficaram velhos frente aos `.pm` |
 | `gen-status.py` | gera `status.json` **e `apps.json`** (apps, réplicas, requests/limits agregados, pods) e os históricos `history.json`/`pod-history.json`/`node-history.json` a partir do k3s local; sem segredos; no host: `/usr/local/sbin/gen-k8s-status.py`, cron root a cada minuto |
+| `k8s-rrd-collect` (+ `.service`/`.timer`) | **fase 1 do `docs/PLAN-NODE-LOCAL-HISTORY.md`, em paralelo com o cron:** histórico local do nó em RRD (`/var/lib/rrdcached/db/pve-k8s-1.0/{node,app,pod}/…`) lido só do kubelet local, sem apiserver; legível com `PVE::RRD::create_rrd_data`. No host: `/usr/local/sbin/k8s-rrd-collect`, timer systemd a cada minuto (instalação manual até a fase 3) |
 | `app-browser.js` | widget `pveK8sAppBrowser` + `PVE.k8sapp.CmdMenu` — painel e menu de contexto da aplicação; janelas de escala, logs, describe e exclusão de pod |
 | `index.html` | painel da aba do nó, servido em `/pve2/js/k8s/index.html` |
 | `manage.sh` | `verify` (checagem completa, inclui a guarda do dispatcher e as 10 rotas de ação) e `uninstall` (rollback da UI) |
