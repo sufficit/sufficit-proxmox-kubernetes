@@ -1106,13 +1106,16 @@ sub rrd_shares {
 }
 
 # Fetch with the native PVE reader and sum the series of several files by time.
+# For an app spread over nodes the limits add up too: maxcpu/maxmem/maxdisk are
+# the sum of each node's share (declared limits, or that node's capacity).
 sub rrd_sum {
     my ($rels, $timeframe, $cf) = @_;
     my %by_time;
     for my $rel (@$rels) {
         my $rows = eval { PVE::RRD::create_rrd_data("pve-k8s-1.0/$rel", $timeframe // 'hour', $cf // 'AVERAGE') } || [];
         for my $row (@$rows) {
-            my $acc = $by_time{ $row->{time} } //= { time => $row->{time} };
+            # +0: the value was used as a hash key and would be encoded as a string
+            my $acc = $by_time{ $row->{time} } //= { time => $row->{time} + 0 };
             for my $k (keys %$row) {
                 next if $k eq 'time' || !defined($row->{$k});
                 $acc->{$k} = ($acc->{$k} // 0) + $row->{$k};
@@ -1126,7 +1129,7 @@ sub rrd_sum {
 # (cpu is a fraction of maxcpu; the model multiplies by 100).
 sub rrd_guest_row {
     my ($r) = @_;
-    my $out = { time => $r->{time} };
+    my $out = { time => $r->{time} + 0 };
     return $out if !defined($r->{cores});
     $out->{cpu} = $r->{maxcpu} ? $r->{cores} / $r->{maxcpu} : undef;
     $out->{$_} = $r->{$_} for grep { defined($r->{$_}) } qw(maxcpu mem maxmem disk maxdisk netin netout);
