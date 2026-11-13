@@ -1,6 +1,7 @@
 # Plan: node-local history in RRD, live state on demand
 
-Date: 2026-11-13. Status: phase 1 running (collector in parallel since 2026-11-13 18:40 BRT). Owner decision: each PVE node produces its own data; the UI must not
+Date: 2026-11-13. Status: phases 1-2 deployed on eveo/apoint/castrum (2026-11-13 19:00 BRT); graphs switch to RRD automatically on
+2026-11-14 ~19:00 BRT (`.since` + 24 h); phases 3-4 pending. Owner decision: each PVE node produces its own data; the UI must not
 depend on VictoriaMetrics or on any other node to draw its own graphs.
 
 ## Problem (measured 2026-11-13)
@@ -23,18 +24,22 @@ VictoriaMetrics runs only on eveo; if it is down, every node loses its graphs.
 
 ### History: node-local RRD, same machinery as PVE guests
 
-- A collector on each node reads **only its own node** from the local kubelet (`/api/v1/nodes/<node>/proxy/stats/summary`
-  or `/metrics/resource`): CPU, memory and ephemeral disk per pod running on this node. No cluster-wide list.
-- Writes through the `rrdcached` that PVE already runs, into `/var/lib/rrdcached/db/pve-k8s-1.0/`:
-  - `node` : aggregate of this node's pods (today `node-history.json`);
+- **Revised 2026-11-13:** every PVE node collects **every Kubernetes node**: its own kubelet directly
+  (`https://127.0.0.1:10250`, works with the apiserver down) and the others through the apiserver node proxy
+  (`/api/v1/nodes/<n>/proxy/stats/summary` and `/pods`, ~0.1 s each). Reason: altatech-cloud and hostinger are
+  Kubernetes nodes but not PVE cluster members, so a per-node fan-out through pveproxy could never reach their share.
+  With full replication each PVE node draws every graph alone, with no fan-out and no UI change. Still no
+  cluster-wide object lists. Cost: ~0.25 s CPU per run on eveo for the 5 nodes, ~110 MB of RRD per PVE node.
+- Writes through the `rrdcached` that PVE already runs, into `/var/lib/rrdcached/db/pve-k8s-1.0/<k8s-node>/`:
+  - `node` : aggregate of that node's pods (today `node-history.json`);
   - `pod/<namespace>/<pod>` : per pod (today `pod-history.json`);
-  - `app/<namespace>/<name>` : this node's share of each application (today `history.json`).
+  - `app/<namespace>/<name>` : that node's share of each application (today `history.json`).
 - RRD files use the same RRAs as `pve-vm-9.0` (1 min for a day, 30 min for a month, 6 h for a year), fixed size,
   constant-cost updates; no more rewriting megabytes per minute.
 - Endpoints `rrddata`, `podrrddata` and `noderrddata` in `k8sapp.pm` read with `PVE::RRD::create_rrd_data(...)`, the
   same reader the native guest graphs use (it accepts any name under `/var/lib/rrdcached/db/`).
-- An application with pods on several nodes: the panel asks each node that hosts a pod
-  (`/nodes/{n}/k8sapp/{appid}/rrddata`, proxied by pveproxy) and sums the series. A node down only removes its share.
+- An application with pods on several nodes: the endpoint sums the shares of every node directory it holds locally.
+  Limits add up the same way (`maxcpu`/`maxmem`/`maxdisk` = sum of the shares).
 - Garbage collection: RRD files untouched for 30 days are removed by the collector.
 
 ### Live state: on demand with a short cache
@@ -70,14 +75,26 @@ VictoriaMetrics runs only on eveo; if it is down, every node loses its graphs.
      `node-history.json` (CPU and memory).
 2. Switch `noderrddata`/`podrrddata`/`rrddata` to RRD; per-app fan-out in `app-browser.js`; Playwright specs
    `node-usage.spec.js` and `pods-in-tree.spec.js` updated.
+   - **Deployed 2026-11-13** with `manage.sh update --tarball` on eveo, apoint, castrum (one at a time), verify
+     `TUDO OK` on the 3. Endpoints read `PVE::RRD::create_rrd_data`; `?source=rrd|json|auto` (default auto: RRD once
+     `pve-k8s-1.0/.since` is 24 h old, JSON before). Fan-out dropped (see the design revision above).
+   - Checked with `pvesh` on eveo, `source=rrd`: node (cpu, mem, host disk, pods disk, netin/netout), app
+     `kube-system:coredns` summed over 4 nodes, one coredns pod; `time` numeric.
+   - **Bug found and fixed:** `noderrddata` (literal path) cannot sit next to `{appid}` in PVE's RESTHandler
+     ("path match error - regex and fixed items"): the module from #16 never loaded, so hosts stayed on the older
+     K8sApp.pm. Node history is now `{appid}/rrddata` with the reserved appid `node`; UI, `manage.sh verify` and
+     `node-usage.spec.js` follow.
+   - `patch_ui.py` installs the collector and enables the timer; `manage.sh verify` checks the timer, `uninstall`
+     removes it and the RRD directory.
+   - Not done: Playwright suite not run (needs the test login environment); only `manage.sh verify` and `pvesh`.
+   - Pending: confirm the automatic cutover on 2026-11-14 ~19:00 BRT on the 3 nodes.
 3. Live state on demand + 30 s cache; remove `history.json`, `pod-history.json`, `node-history.json` and the cron
    from `patch_ui.py`/`manage.sh` (`manage.sh` checks updated).
 4. Measure again on the 3 nodes (CPU per minute, apiserver request rate) and record in an activity.
 
 ## Findings to resolve along the way
 
-- Production `K8sApp.pm` (identical md5 on the 3 nodes) lacks the `noderrddata` endpoint from #16 while
-  `gen-status.py` is current: the last install did not redeploy `k8sapp.pm`. Redeploy with `manage.sh` in phase 2.
+- ~~Production `K8sApp.pm` lacked `noderrddata` from #16~~: it could not load (see phase 2); fixed and deployed.
 - apoint had 18 empty `.tmp-*` files in `/usr/share/pve-manager/js/k8s/` left by runs killed mid-write; cleaned on
   2026-11-13. The collector must remove its temp file on failure.
 

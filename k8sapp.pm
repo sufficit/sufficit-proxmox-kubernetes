@@ -11,6 +11,7 @@ use PVE::Cluster;
 use PVE::Exception qw(raise raise_perm_exc raise_param_exc);
 use PVE::RESTHandler;
 use PVE::RPCEnvironment;
+use PVE::RRD;
 # upid_decode/upid_normalize_status_type are NOT in PVE::Tools' @EXPORT_OK
 # (only split_list is): call those fully qualified.
 use PVE::Tools qw(file_get_contents run_command split_list);
@@ -1072,6 +1073,124 @@ __PACKAGE__->register_method({
     },
 });
 
+# ---------------------------------------------------------------- RRD history
+# k8s-rrd-collect (every PVE node, every minute) keeps the history of EVERY
+# Kubernetes node under /var/lib/rrdcached/db/pve-k8s-1.0/<k8s-node>/, so each
+# PVE node answers these endpoints alone. The JSON history written by
+# gen-status.py stays as fallback until the RRD has a full day of data
+# (marker <root>/.since written by the collector on its first sample) or when
+# the caller forces ?source=json.
+my $rrd_root = '/var/lib/rrdcached/db/pve-k8s-1.0';
+my $rrd_name_re = qr/^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
+
+sub rrd_wanted {
+    my ($source) = @_;
+    return 0 if ($source // 'auto') eq 'json';
+    return 1 if ($source // 'auto') eq 'rrd';
+    my $since = eval { file_get_contents("$rrd_root/.since") } // '';
+    return $since =~ /^(\d+)/ && (time() - $1) >= 86400 ? 1 : 0;
+}
+
+# Relative names (under pve-k8s-1.0/) of one object on every k8s node that has it.
+sub rrd_shares {
+    my ($kind, $ns, $name) = @_;
+    return [] if $ns !~ $rrd_name_re || $name !~ $rrd_name_re;
+    my @rel;
+    opendir(my $dh, $rrd_root) or return [];
+    for my $node (sort readdir($dh)) {
+        next if $node =~ /^\./ || $node !~ $rrd_name_re;
+        push @rel, "$node/$kind/$ns/$name" if -f "$rrd_root/$node/$kind/$ns/$name";
+    }
+    closedir($dh);
+    return \@rel;
+}
+
+# Fetch with the native PVE reader and sum the series of several files by time.
+# For an app spread over nodes the limits add up too: maxcpu/maxmem/maxdisk are
+# the sum of each node's share (declared limits, or that node's capacity).
+sub rrd_sum {
+    my ($rels, $timeframe, $cf) = @_;
+    my %by_time;
+    for my $rel (@$rels) {
+        my $rows = eval { PVE::RRD::create_rrd_data("pve-k8s-1.0/$rel", $timeframe // 'hour', $cf // 'AVERAGE') } || [];
+        for my $row (@$rows) {
+            # +0: the value was used as a hash key and would be encoded as a string
+            my $acc = $by_time{ $row->{time} } //= { time => $row->{time} + 0 };
+            for my $k (keys %$row) {
+                next if $k eq 'time' || !defined($row->{$k});
+                $acc->{$k} = ($acc->{$k} // 0) + $row->{$k};
+            }
+        }
+    }
+    return [ map { $by_time{$_} } sort { $a <=> $b } keys %by_time ];
+}
+
+# RRD row -> the guest-like record the proxmoxRRDChart expects
+# (cpu is a fraction of maxcpu; the model multiplies by 100).
+sub rrd_guest_row {
+    my ($r) = @_;
+    my $out = { time => $r->{time} + 0 };
+    return $out if !defined($r->{cores});
+    $out->{cpu} = $r->{maxcpu} ? $r->{cores} / $r->{maxcpu} : undef;
+    $out->{$_} = $r->{$_} for grep { defined($r->{$_}) } qw(maxcpu mem maxmem disk maxdisk netin netout);
+    return $out;
+}
+
+# Aggregated Kubernetes usage of this node in the guest RRD format (node tab
+# charts). Served as {appid}/rrddata with the reserved appid 'node': PVE's
+# RESTHandler refuses a literal path ('noderrddata') next to the {appid}
+# pattern at the same level ("path match error - regex and fixed items"),
+# which kept the module from loading. Real appids always contain ':'.
+sub node_rrddata {
+    my ($param) = @_;
+    my $node = $param->{node};
+    if (rrd_wanted($param->{source}) && $node =~ $rrd_name_re && -f "$rrd_root/$node/node") {
+        return [ map {
+            my $r = $_;
+            my $out = rrd_guest_row($r);
+            # node tab: disk is the host root fs (same number as PVE's
+            # "Disk usage"); the pods' ephemeral storage goes apart.
+            if (defined($r->{cores})) {
+                $out->{disk} = $r->{hostdisk};
+                $out->{maxdisk} = $r->{maxhostdisk};
+                $out->{podsdisk} = $r->{disk};
+            }
+            $out;
+        } @{ rrd_sum(["$node/node"], $param->{timeframe}, $param->{cf}) } ];
+    }
+    # node-history.json: { max => [cpuMilli, memBytes, diskBytes],
+    #   series => [[ts, cpuMilli, memBytes, hostDiskBytes, podsDiskBytes], ...] }
+    # (amostras pre-v1.0.10 tem 3 ou 4 campos: o que falta vira null)
+    my $data = read_json_file($node_history_file) || {};
+    my $samples = $data->{series} || [];
+    my ($maxcpu_m, $maxmem, $maxdisk) = @{ $data->{max} || [0, 0, 0] };
+    my %tail_of = (hour => 70, day => 1440, week => 10080, month => 43200, year => 525600);
+    my $tail = $tail_of{ $param->{timeframe} // 'hour' } // 1440;
+    my @slice = scalar(@$samples) > $tail ? @$samples[-$tail .. -1] : @$samples;
+    my @result;
+    for my $s (@slice) {
+        my $disk = $s->[3];
+        $disk = undef if defined($disk) && $disk <= 0;
+        push @result, {
+            time => $s->[0],
+            # fracao da capacidade do no (o model multiplica por 100), igual
+            # ao CPU usage nativo do no no PVE
+            cpu => $maxcpu_m ? ($s->[1] // 0) / $maxcpu_m : undef,
+            maxcpu => $maxcpu_m ? $maxcpu_m / 1000 : undef,
+            mem => $s->[2], maxmem => $maxmem,
+            disk => $disk, maxdisk => $maxdisk,
+            podsdisk => $s->[4],
+            netin => 0, netout => 0,
+        };
+    }
+    return \@result;
+}
+
+my $source_param = {
+    type => 'string', enum => ['auto', 'rrd', 'json'], optional => 1,
+    description => 'History source: RRD (k8s-rrd-collect), the legacy JSON files, or auto.',
+};
+
 __PACKAGE__->register_method({
     name => 'rrddata',
     path => '{appid}/rrddata',
@@ -1083,16 +1202,24 @@ __PACKAGE__->register_method({
         additionalProperties => 0,
         properties => {
             node => get_standard_option('pve-node'),
-            appid => { type => 'string', description => 'Namespace:name application identifier.' },
+            appid => { type => 'string', description => "Namespace:name application identifier, or 'node' for this node's aggregate." },
             timeframe => { type => 'string', enum => ['hour', 'day', 'week', 'month', 'year'], optional => 1 },
             cf => { type => 'string', enum => ['AVERAGE', 'MAX'], optional => 1 },
+            source => $source_param,
         },
     },
     returns => { type => 'array', items => { type => 'object', properties => {} } },
     code => sub {
         my ($param) = @_;
+        return node_rrddata($param) if $param->{appid} eq 'node';
         my $app = app_from_id($param->{appid});
         raise_param_exc({ appid => 'Kubernetes application not found' }) if !$app;
+        if (rrd_wanted($param->{source})) {
+            # sum of the app's share on every k8s node (pods spread over nodes)
+            my $rels = rrd_shares('app', $app->{namespace} // '', $app->{name} // '');
+            return [ map { rrd_guest_row($_) } @{ rrd_sum($rels, $param->{timeframe}, $param->{cf}) } ]
+                if @$rels;
+        }
         my $data = read_json_file($history_file) || {};
         my $samples = $data->{series}{ $param->{appid} } || [];
         # history.json guarda 1 amostra/minuto (POC); recortes maiores mostram
@@ -1117,57 +1244,6 @@ __PACKAGE__->register_method({
 });
 
 __PACKAGE__->register_method({
-    name => 'noderrddata',
-    # Serie agregada do NO (soma dos pods com nodeName == este host), no mesmo
-    # formato RRD dos guests: alimenta os proxmoxRRDChart nativos da aba
-    # Kubernetes do no. Path literal: o RESTHandler casa literais antes de
-    # {appid}, e appids reais sempre contem ':' (namespace:nome).
-    path => 'noderrddata',
-    method => 'GET',
-    protected => 1,
-    permissions => { check => ['perm', '/nodes/{node}', ['Sys.Audit']] },
-    description => 'Read aggregated Kubernetes pod usage of this node (RRD format).',
-    parameters => {
-        additionalProperties => 0,
-        properties => {
-            node => get_standard_option('pve-node'),
-            timeframe => { type => 'string', enum => ['hour', 'day', 'week', 'month', 'year'], optional => 1 },
-            cf => { type => 'string', enum => ['AVERAGE', 'MAX'], optional => 1 },
-        },
-    },
-    returns => { type => 'array', items => { type => 'object', properties => {} } },
-    code => sub {
-        my ($param) = @_;
-        # node-history.json: { max => [cpuMilli, memBytes, diskBytes],
-        #   series => [[ts, cpuMilli, memBytes, hostDiskBytes, podsDiskBytes], ...] }
-        # (amostras pre-v1.0.10 tem 3 ou 4 campos: o que falta vira null)
-        my $data = read_json_file($node_history_file) || {};
-        my $samples = $data->{series} || [];
-        my ($maxcpu_m, $maxmem, $maxdisk) = @{ $data->{max} || [0, 0, 0] };
-        my %tail_of = (hour => 70, day => 1440, week => 10080, month => 43200, year => 525600);
-        my $tail = $tail_of{ $param->{timeframe} // 'hour' } // 1440;
-        my @slice = scalar(@$samples) > $tail ? @$samples[-$tail .. -1] : @$samples;
-        my @result;
-        for my $s (@slice) {
-            my $disk = $s->[3];
-            $disk = undef if defined($disk) && $disk <= 0;
-            push @result, {
-                time => $s->[0],
-                # fracao da capacidade do no (o model multiplica por 100), igual
-                # ao CPU usage nativo do no no PVE
-                cpu => $maxcpu_m ? ($s->[1] // 0) / $maxcpu_m : undef,
-                maxcpu => $maxcpu_m ? $maxcpu_m / 1000 : undef,
-                mem => $s->[2], maxmem => $maxmem,
-                disk => $disk, maxdisk => $maxdisk,
-                podsdisk => $s->[4],
-                netin => 0, netout => 0,
-            };
-        }
-        return \@result;
-    },
-});
-
-__PACKAGE__->register_method({
     name => 'podrrddata',
     # The pod goes in the path (not the query string): Proxmox.data.RRDStore
     # appends '?timeframe=..&cf=..' to its rrdurl, so rrdurl must be a bare path.
@@ -1184,6 +1260,7 @@ __PACKAGE__->register_method({
             pod => { type => 'string', description => 'Pod name (must belong to the application).' },
             timeframe => { type => 'string', enum => ['hour', 'day', 'week', 'month', 'year'], optional => 1 },
             cf => { type => 'string', enum => ['AVERAGE', 'MAX'], optional => 1 },
+            source => $source_param,
         },
     },
     returns => { type => 'array', items => { type => 'object', properties => {} } },
@@ -1197,6 +1274,11 @@ __PACKAGE__->register_method({
             if (($pod->{name} // '') eq $param->{pod}) { $allowed = 1; last; }
         }
         raise_param_exc({ pod => 'Pod does not belong to this application' }) if !$allowed;
+        if (rrd_wanted($param->{source})) {
+            my $rels = rrd_shares('pod', $app->{namespace} // '', $param->{pod});
+            return [ map { rrd_guest_row($_) } @{ rrd_sum($rels, $param->{timeframe}, $param->{cf}) } ]
+                if @$rels;
+        }
 
         # pod-history.json: { max => { "ns:pod" => [cpuLimitCores, memLimitBytes, diskMaxBytes] },
         #                     series => { "ns:pod" => [[ts, milliCPU, memBytes, diskBytes], ...] } }

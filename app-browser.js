@@ -2752,7 +2752,7 @@ Ext.define('PVE.k8s.PodPanel', {
 /*
  * Aba "Kubernetes" do NO: graficos NATIVOS do PVE (Proxmox.data.RRDStore +
  * proxmoxRRDChart + proxmoxRRDTypeSelector), os mesmos do Summary do no/VM/LXC.
- * Fonte: /nodes/{node}/k8sapp/noderrddata (node-history.json agregado: soma dos
+ * Fonte: /nodes/{node}/k8sapp/node/rrddata (node-history.json agregado: soma dos
  * pods com nodeName == este host). O proxmoxRRDChart auto-escala o eixo Y, tem
  * tooltip, zoom/undo e seletor Hora/Dia/Semana/Mes/Ano -- substitui os canvas
  * desenhados a mao do iframe (que ficam ocultos quando este painel existe).
@@ -2773,7 +2773,7 @@ Ext.define('PVE.k8s.NodeUsage', {
             throw 'no node name specified';
         }
         me.rrdstore = Ext.create('Proxmox.data.RRDStore', {
-            rrdurl: `/api2/json/nodes/${encodeURIComponent(node)}/k8sapp/noderrddata`,
+            rrdurl: `/api2/json/nodes/${encodeURIComponent(node)}/k8sapp/node/rrddata`,
             model: 'pve-rrd-k8sapp',
         });
         let chart = (cfg) => Ext.apply({
