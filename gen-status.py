@@ -144,10 +144,10 @@ def write_json(path, obj, compact=False):
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
     with os.fdopen(fd, "w") as f:
-        if compact:
-            json.dump(obj, f, separators=(",", ":"))
-        else:
-            json.dump(obj, f, indent=1)
+        # Always compact: json.dumps with indent=None uses the C encoder.
+        # indent=1 fell back to the pure-Python encoder and cost ~20 s per run
+        # on a 22 MB history.json (2026-11-13). `compact` kept for callers.
+        f.write(json.dumps(obj, separators=(",", ":")))
     os.chmod(tmp, 0o644)
     os.replace(tmp, path)
 
