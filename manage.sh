@@ -103,6 +103,7 @@ verify() {
   grep -q "pveK8sConsole\|loadXterm" "$K8S_DIR/app-browser.js" && ok "app-browser.js com widget de console (xterm.js)" || fail "app-browser.js sem console"
   [ -x "$GEN" ] && ok "gerador instalado ($GEN)" || fail "gerador ausente"
   crontab -l 2>/dev/null | grep -q gen-k8s-status && ok "cron ativo (1 min)" || fail "cron ausente"
+  systemctl is-active --quiet k8s-rrd-collect.timer && ok "k8s-rrd-collect.timer ativo (historico RRD)" || fail "k8s-rrd-collect.timer inativo"
 
   echo "== Serviços =="
   for s in k3s pveproxy pvedaemon pvestatd; do
@@ -174,8 +175,8 @@ except Exception:
     code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -H "Authorization: $AUTH" -o /dev/null -w "%{http_code}" "https://$FQDN:8006/api2/json/nodes/$SHORT/k8sapp/$appid/rrddata?timeframe=hour")
     [ "$code" = 200 ] && ok "/k8sapp/{appid}/rrddata -> 200" || fail "/k8sapp/{appid}/rrddata -> $code"
     # v1.0.11: serie agregada do no (graficos nativos da aba Kubernetes).
-    code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -H "Authorization: $AUTH" -o /dev/null -w "%{http_code}" "https://$FQDN:8006/api2/json/nodes/$SHORT/k8sapp/noderrddata?timeframe=hour")
-    [ "$code" = 200 ] && ok "/k8sapp/noderrddata -> 200 (serie agregada do no)" || fail "/k8sapp/noderrddata -> $code"
+    code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -H "Authorization: $AUTH" -o /dev/null -w "%{http_code}" "https://$FQDN:8006/api2/json/nodes/$SHORT/k8sapp/node/rrddata?timeframe=hour")
+    [ "$code" = 200 ] && ok "/k8sapp/node/rrddata -> 200 (serie agregada do no)" || fail "/k8sapp/node/rrddata -> $code"
     podname=$(python3 -c 'import json; d=json.load(open("/usr/share/pve-manager/js/k8s/apps.json")); a=(d.get("apps") or [{}])[0]; print(((a.get("pods") or [{}])[0]).get("name",""))' 2>/dev/null)
     if [ -n "$podname" ]; then
       code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -H "Authorization: $AUTH" -o /dev/null -w "%{http_code}" "https://$FQDN:8006/api2/json/nodes/$SHORT/k8sapp/$appid/pods/$podname/rrddata?timeframe=hour")
@@ -270,6 +271,10 @@ uninstall() {
   rm -rf "$K8S_STATE_DIR" && echo "  removido: $K8S_STATE_DIR (notas)"
   ( crontab -l 2>/dev/null | grep -v gen-k8s-status | grep -v 'k8snet-apply-node' || true ) | crontab -
   rm -f "$GEN" && echo "  removido: $GEN"
+  systemctl disable --now k8s-rrd-collect.timer >/dev/null 2>&1
+  rm -f /usr/local/sbin/k8s-rrd-collect /etc/systemd/system/k8s-rrd-collect.service /etc/systemd/system/k8s-rrd-collect.timer
+  systemctl daemon-reload >/dev/null 2>&1
+  rm -rf /var/lib/rrdcached/db/pve-k8s-1.0 && echo "  removido: k8s-rrd-collect (timer + historico RRD)"
   systemctl restart pveproxy && echo "  pveproxy reiniciado"
   systemctl restart pvedaemon && echo "  pvedaemon reiniciado"
   echo "== Concluído. Faça reload forte (Ctrl+F5) na UI. =="

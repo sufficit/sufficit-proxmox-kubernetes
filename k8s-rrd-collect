@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
 """
-Purpose: node-local Kubernetes history for the Proxmox UI. Reads ONLY this
-         node's kubelet (no apiserver, no cluster-wide lists) and writes RRD
-         files through the rrdcached that PVE already runs, so every node keeps
-         its own history and draws its graphs without depending on any other
-         node or on an external metrics store.
+Purpose: Kubernetes history for the Proxmox UI, kept by EVERY PVE node on its
+         own disk. Each run reads the kubelet of each Kubernetes node (this
+         node's kubelet directly, the others through the apiserver node proxy:
+         only /stats/summary and /pods, no cluster-wide object lists) and
+         writes RRD files through the rrdcached that PVE already runs. Every PVE
+         node can draw every graph alone: no dependency on another PVE node or
+         on an external metrics store. Kubernetes nodes outside the PVE cluster
+         (altatech, hostinger) are covered the same way.
 Usage:   k8s-rrd-collect            # one sample (systemd timer, every minute)
          k8s-rrd-collect --dry-run  # print what would be written
-Files:   /var/lib/rrdcached/db/pve-k8s-1.0/
-           node/<node>              aggregate of the pods on this node
-           app/<namespace>/<name>   this node's share of an application
+Files:   /var/lib/rrdcached/db/pve-k8s-1.0/<k8s-node>/
+           node                     aggregate of the pods on that node
+           app/<namespace>/<name>   that node's share of an application
            pod/<namespace>/<pod>    one pod
          Read back with PVE::RRD::create_rrd_data("pve-k8s-1.0/...").
-Data sources (step 60 s):
-  cores   GAUGE   CPU cores used (rate over the last interval)
-  maxcpu  GAUGE   cores: sum of CPU limits, or node cores when unlimited
-  mem     GAUGE   working set bytes            maxmem  GAUGE  limit or node RAM
-  disk    GAUGE   ephemeral-storage used bytes maxdisk GAUGE  limit or node fs
-  netin / netout  GAUGE   bytes/s (hostNetwork pods are skipped)
+Data sources (step 60 s, all GAUGE):
+  cores   CPU cores used (rate over the last interval)
+  maxcpu  cores: sum of CPU limits, or node cores when unlimited
+  mem     working set bytes             maxmem   limit or node RAM
+  disk    ephemeral-storage used bytes  maxdisk  limit or node fs
+  netin / netout  bytes/s (hostNetwork pods are skipped)
+  node also: hostdisk, maxhostdisk (root fs), pods
+  app also:  pods, podsready, restarts
 Rates are computed per pod from the kubelet's cumulative counters against the
 previous run (state in /run), then summed: a pod appearing or disappearing
 never produces a negative step or a spike in the node/app series.
-  node also: hostdisk, maxhostdisk (rootfs, same as PVE), pods
-  app also:  pods, podsready, restarts
-Last modified: 2026-11-13
+Last modified: 2026-11-13 (multi-node, .since marker)
 """
 import fcntl
 import json
@@ -32,15 +35,21 @@ import socket
 import ssl
 import sys
 import time
+import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 RRD_ROOT = "/var/lib/rrdcached/db/pve-k8s-1.0"
 RRD_SOCK = "/var/run/rrdcached.sock"
 KUBELET = "https://127.0.0.1:10250"
+APISERVER = "https://127.0.0.1:6443"
 TLS_DIR = "/var/lib/rancher/k3s/server/tls"
-CLIENT_CERT = os.path.join(TLS_DIR, "client-kube-apiserver.crt")
-CLIENT_KEY = os.path.join(TLS_DIR, "client-kube-apiserver.key")
 SERVER_CA = os.path.join(TLS_DIR, "server-ca.crt")
+# kubelet accepts the apiserver's own client cert; the apiserver accepts admin.
+KUBELET_CERT = (os.path.join(TLS_DIR, "client-kube-apiserver.crt"),
+                os.path.join(TLS_DIR, "client-kube-apiserver.key"))
+API_CERT = (os.path.join(TLS_DIR, "client-admin.crt"),
+            os.path.join(TLS_DIR, "client-admin.key"))
 LOCK = "/run/k8s-rrd-collect.lock"
 STATE = "/run/k8s-rrd-collect.state.json"
 STEP = 60
@@ -51,14 +60,9 @@ HEARTBEAT = 120
 RRA_LONG = ["1:1440", "30:1440", "360:1440"]
 RRA_POD = ["1:1440", "30:1440"]
 
-DS_COMMON = [
-    ("cores", "GAUGE"), ("maxcpu", "GAUGE"),
-    ("mem", "GAUGE"), ("maxmem", "GAUGE"),
-    ("disk", "GAUGE"), ("maxdisk", "GAUGE"),
-    ("netin", "GAUGE"), ("netout", "GAUGE"),
-]
-DS_NODE = DS_COMMON + [("hostdisk", "GAUGE"), ("maxhostdisk", "GAUGE"), ("pods", "GAUGE")]
-DS_APP = DS_COMMON + [("pods", "GAUGE"), ("podsready", "GAUGE"), ("restarts", "GAUGE")]
+DS_COMMON = ["cores", "maxcpu", "mem", "maxmem", "disk", "maxdisk", "netin", "netout"]
+DS_NODE = DS_COMMON + ["hostdisk", "maxhostdisk", "pods"]
+DS_APP = DS_COMMON + ["pods", "podsready", "restarts"]
 DS_POD = DS_COMMON
 
 # Files not updated for this long are removed (seconds).
@@ -66,11 +70,11 @@ GC_POD = 2 * 86400
 GC_APP = 30 * 86400
 
 
-def kubelet_get(path):
+def https_json(base, path, cert, timeout=10):
     ctx = ssl.create_default_context(cafile=SERVER_CA)
-    ctx.check_hostname = False  # serving cert is issued for the node name/IP
-    ctx.load_cert_chain(CLIENT_CERT, CLIENT_KEY)
-    with urllib.request.urlopen(KUBELET + path, context=ctx, timeout=10) as r:
+    ctx.check_hostname = False  # kubelet serving cert names the node, not 127.0.0.1
+    ctx.load_cert_chain(*cert)
+    with urllib.request.urlopen(base + path, context=ctx, timeout=timeout) as r:
         return json.load(r)
 
 
@@ -101,18 +105,12 @@ def quantity_bytes(q):
     return int(float(q))
 
 
-def host_memory():
+def local_memory():
     with open("/proc/meminfo") as f:
         for line in f:
             if line.startswith("MemTotal:"):
                 return int(line.split()[1]) * 1024
     return 0
-
-
-def rootfs():
-    st = os.statvfs("/")
-    total = st.f_blocks * st.f_frsize
-    return (st.f_blocks - st.f_bfree) * st.f_frsize, total
 
 
 def app_of(meta):
@@ -134,6 +132,18 @@ def app_of(meta):
     return "Pod", meta.get("name")
 
 
+def rate(prev, key, counter, now):
+    """Per-second rate of a cumulative counter since the previous run."""
+    old = prev.get(key)
+    if counter is None or not old:
+        return None
+    dt = now - old[0]
+    delta = counter - old[1]
+    if dt <= 0 or dt > 3 * STEP or delta < 0:  # gap or counter reset
+        return None
+    return delta / dt
+
+
 class RRDCached:
     def __init__(self, path):
         self.sock = socket.socket(socket.AF_UNIX)
@@ -149,7 +159,7 @@ class RRDCached:
         for _ in range(max(n, 0)):
             self.f.readline()
         if n < 0:
-            raise RuntimeError(f"rrdcached: {status} ({line.split()[0]} {line.split()[1]})")
+            raise RuntimeError(f"rrdcached: {status}")
         return status
 
     def ensure(self, path, ds, rras, now):
@@ -157,40 +167,20 @@ class RRDCached:
             return
         os.makedirs(os.path.dirname(path), exist_ok=True)
         parts = [f"CREATE {path} -s {STEP} -b {now - STEP}"]
-        for name, typ in ds:
-            parts.append(f"DS:{name}:{typ}:{HEARTBEAT}:0:U")
-        for cf in ("AVERAGE", "MAX"):
-            for r in rras:
-                parts.append(f"RRA:{cf}:0.5:{r}")
+        parts += [f"DS:{name}:GAUGE:{HEARTBEAT}:0:U" for name in ds]
+        parts += [f"RRA:{cf}:0.5:{r}" for cf in ("AVERAGE", "MAX") for r in rras]
         self.cmd(" ".join(parts))
 
     def update(self, path, ds, values, now):
-        vals = []
-        for name, typ in ds:
-            v = values.get(name)
-            vals.append("U" if v is None else str(v))
+        vals = ["U" if values.get(n) is None else str(values[n]) for n in ds]
         self.cmd(f"UPDATE {path} {now}:{':'.join(vals)}")
 
 
-def rate(prev, key, counter, now):
-    """Per-second rate of a cumulative counter since the previous run."""
-    old = prev.get(key)
-    if counter is None or not old:
-        return None
-    dt = now - old[0]
-    delta = counter - old[1]
-    if dt <= 0 or dt > 3 * STEP or delta < 0:  # gap or counter reset
-        return None
-    return delta / dt
-
-
-def collect(now, prev, state):
-    summary = kubelet_get("/stats/summary")
-    podlist = kubelet_get("/pods")
-    node = (summary.get("node") or {}).get("nodeName") or socket.gethostname()
-    node_cpus = float(os.cpu_count() or 1)
-    node_mem = host_memory()
-    node_fs = int(((summary.get("node") or {}).get("fs") or {}).get("capacityBytes") or 0)
+def node_sample(node, summary, podlist, cap, now, prev, state):
+    """Samples of one Kubernetes node: (node values, {app: values}, {pod: values})."""
+    node_cpus, node_mem, root = cap["cpus"], cap["mem"], cap.get("root")
+    nfs = (summary.get("node") or {}).get("fs") or {}
+    node_fs = int(nfs.get("capacityBytes") or 0)
 
     stats = {}
     for p in summary.get("pods") or []:
@@ -214,7 +204,6 @@ def collect(now, prev, state):
             lim_disk += quantity_bytes(lim.get("ephemeral-storage"))
         net = st.get("network") or {}
         host_net = bool(spec.get("hostNetwork"))
-        cs = status.get("containerStatuses") or []
         uid = meta.get("uid") or f"{ns}/{name}"
         counters = {
             "cpu": (st.get("cpu") or {}).get("usageCoreNanoSeconds"),
@@ -238,37 +227,37 @@ def collect(now, prev, state):
         }
         pods[(ns, name)] = v
 
-        kind, aname = app_of(meta)
+        _kind, aname = app_of(meta)
         a = apps.setdefault((ns, aname), {
             "cores": 0.0, "maxcpu": 0.0, "mem": 0, "maxmem": 0, "disk": 0, "maxdisk": 0,
-            "netin": 0, "netout": 0, "pods": 0, "podsready": 0, "restarts": 0,
-            "_unlim_cpu": False, "_unlim_mem": False, "_unlim_disk": False,
+            "netin": 0.0, "netout": 0.0, "pods": 0, "podsready": 0, "restarts": 0,
+            "_unlim": [False, False, False],
         })
         for k in ("cores", "mem", "disk", "netin", "netout"):
             a[k] += v[k] or 0
         a["maxcpu"] += lim_cpu
         a["maxmem"] += lim_mem
         a["maxdisk"] += lim_disk
-        a["_unlim_cpu"] |= lim_cpu <= 0
-        a["_unlim_mem"] |= lim_mem <= 0
-        a["_unlim_disk"] |= lim_disk <= 0
+        a["_unlim"] = [a["_unlim"][0] or lim_cpu <= 0, a["_unlim"][1] or lim_mem <= 0,
+                       a["_unlim"][2] or lim_disk <= 0]
         a["pods"] += 1
         a["podsready"] += 1 if status.get("phase") == "Running" else 0
-        a["restarts"] += sum(int(c.get("restartCount") or 0) for c in cs)
+        a["restarts"] += sum(int(c.get("restartCount") or 0) for c in status.get("containerStatuses") or [])
 
     for a in apps.values():
-        # Any unlimited pod makes the share bounded only by the node (same rule
-        # as gen-status.py: declared limit, otherwise node capacity).
-        if a.pop("_unlim_cpu"):
-            a["maxcpu"] = node_cpus
-        if a.pop("_unlim_mem"):
-            a["maxmem"] = node_mem
-        if a.pop("_unlim_disk"):
-            a["maxdisk"] = node_fs
-        a["maxcpu"] = round(a["maxcpu"], 3)
-        a["cores"] = round(a["cores"], 4)
+        # Any unlimited pod bounds the share only by the node (same rule as
+        # gen-status.py: declared limit, otherwise node capacity).
+        unlim_cpu, unlim_mem, unlim_disk = a.pop("_unlim")
+        a["maxcpu"] = node_cpus if unlim_cpu else round(a["maxcpu"], 3)
+        a["maxmem"] = node_mem if unlim_mem else a["maxmem"]
+        a["maxdisk"] = node_fs if unlim_disk else a["maxdisk"]
+        for k in ("cores", "netin", "netout"):
+            a[k] = round(a[k], 4)
 
-    used, total = rootfs()
+    if root:
+        hostdisk, maxhostdisk = root
+    else:
+        hostdisk, maxhostdisk = nfs.get("usedBytes"), nfs.get("capacityBytes")
     nodev = {
         "cores": round(sum(v["cores"] or 0 for v in pods.values()), 4),
         "maxcpu": node_cpus,
@@ -276,30 +265,74 @@ def collect(now, prev, state):
         "maxmem": node_mem,
         "disk": sum(v["disk"] or 0 for v in pods.values()),
         "maxdisk": node_fs,
-        "netin": sum(v["netin"] or 0 for v in pods.values()),
-        "netout": sum(v["netout"] or 0 for v in pods.values()),
-        "hostdisk": used,
-        "maxhostdisk": total,
+        "netin": round(sum(v["netin"] or 0 for v in pods.values()), 1),
+        "netout": round(sum(v["netout"] or 0 for v in pods.values()), 1),
+        "hostdisk": hostdisk,
+        "maxhostdisk": maxhostdisk,
         "pods": len(pods),
     }
-    return node, nodev, apps, pods
+    return nodev, apps, pods
+
+
+def fetch_node(name, local):
+    """(summary, pods) of one node; the local one straight from its kubelet."""
+    if local:
+        return (https_json(KUBELET, "/stats/summary", KUBELET_CERT),
+                https_json(KUBELET, "/pods", KUBELET_CERT))
+    q = urllib.parse.quote(name, safe="")
+    base = f"/api/v1/nodes/{q}/proxy"
+    return (https_json(APISERVER, base + "/stats/summary", API_CERT),
+            https_json(APISERVER, base + "/pods", API_CERT))
+
+
+def collect(now, prev, state, errors):
+    local = socket.gethostname()
+    caps = {}
+    try:
+        for n in https_json(APISERVER, "/api/v1/nodes", API_CERT).get("items") or []:
+            name = (n.get("metadata") or {}).get("name")
+            cap = (n.get("status") or {}).get("capacity") or {}
+            if name:
+                caps[name] = {"cpus": cpu_cores(cap.get("cpu")) or 1.0,
+                              "mem": quantity_bytes(cap.get("memory"))}
+    except Exception as e:  # apiserver down: still record this node
+        errors.append(f"nodes: {e}")
+    st = os.statvfs("/")
+    caps[local] = {
+        "cpus": float(os.cpu_count() or 1),
+        "mem": local_memory(),
+        # root fs as PVE shows it on the node summary
+        "root": ((st.f_blocks - st.f_bfree) * st.f_frsize, st.f_blocks * st.f_frsize),
+    }
+
+    def one(name):
+        try:
+            return name, fetch_node(name, name == local), None
+        except Exception as e:
+            return name, None, e
+
+    out = []
+    with ThreadPoolExecutor(max_workers=min(8, len(caps))) as ex:
+        for name, data, err in ex.map(one, sorted(caps)):
+            if err is not None:
+                errors.append(f"{name}: {err}")
+                continue
+            out.append((name, *node_sample(name, data[0], data[1], caps[name], now, prev, state)))
+    return out
 
 
 def gc(root, max_age, now):
-    removed = 0
     for dirpath, _dirs, files in os.walk(root):
         for fn in files:
             p = os.path.join(dirpath, fn)
             try:
                 if now - os.path.getmtime(p) > max_age:
                     os.unlink(p)
-                    removed += 1
             except OSError:
                 pass
-    return removed
 
 
-def _save_state(state):
+def save_state(state):
     tmp = STATE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(state, f, separators=(",", ":"))
@@ -320,35 +353,53 @@ def main():
             prev = json.load(f)
     except (OSError, ValueError):
         prev = {}
-    state = {}
-    node, nodev, apps, pods = collect(now, prev, state)
-    if not prev and not dry:
-        # First run (or after reboot): no rates yet, write nothing so the
-        # series do not start with zeros that are not real.
-        _save_state(state)
-        print("first run: counters recorded, no sample written")
-        return 0
-    targets = [(os.path.join(RRD_ROOT, "node", node), DS_NODE, RRA_LONG, nodev)]
-    targets += [(os.path.join(RRD_ROOT, "app", ns, n), DS_APP, RRA_LONG, v) for (ns, n), v in apps.items()]
-    targets += [(os.path.join(RRD_ROOT, "pod", ns, n), DS_POD, RRA_POD, v) for (ns, n), v in pods.items()]
+    state, errors = {}, []
+    nodes = collect(now, prev, state, errors)
+
+    targets = []
+    for node, nodev, apps, pods in nodes:
+        base = os.path.join(RRD_ROOT, node)
+        targets.append((os.path.join(base, "node"), DS_NODE, RRA_LONG, nodev))
+        targets += [(os.path.join(base, "app", ns, n), DS_APP, RRA_LONG, v) for (ns, n), v in apps.items()]
+        targets += [(os.path.join(base, "pod", ns, n), DS_POD, RRA_POD, v) for (ns, n), v in pods.items()]
     if dry:
         for path, _ds, _rra, v in targets:
             print(path, json.dumps(v, sort_keys=True))
+        for e in errors:
+            print("error:", e, file=sys.stderr)
         return 0
-    _save_state(state)
+
+    # Keep counters of nodes that failed this run, so one bad minute does not
+    # cost them two samples.
+    for k, v in prev.items():
+        if now - v[0] <= 3 * STEP:
+            state.setdefault(k, v)
+    save_state(state)
+    if not prev:
+        # First run (or after reboot): no rates yet, write nothing so the
+        # series do not start with zeros that are not real.
+        print("first run: counters recorded, no sample written")
+        return 0
+
     rrd = RRDCached(RRD_SOCK)
-    errors = 0
     for path, ds, rras, v in targets:
         try:
             rrd.ensure(path, ds, rras, now)
             rrd.update(path, ds, v, now)
         except Exception as e:  # one bad file must not stop the others
-            errors += 1
-            print(f"{path}: {e}", file=sys.stderr)
-    # File mtime lags rrdcached's write delay, far below the GC ages.
-    gc(os.path.join(RRD_ROOT, "pod"), GC_POD, now)
-    gc(os.path.join(RRD_ROOT, "app"), GC_APP, now)
-    print(f"ok: node={node} apps={len(apps)} pods={len(pods)} errors={errors}")
+            errors.append(f"{path}: {e}")
+    # First sample marker: k8sapp.pm switches the graphs from the legacy JSON
+    # history to RRD once this is a day old (full "day" view).
+    since = os.path.join(RRD_ROOT, ".since")
+    if not os.path.exists(since):
+        with open(since, "w") as f:
+            f.write(f"{now}\n")
+    for node, *_ in nodes:
+        gc(os.path.join(RRD_ROOT, node, "pod"), GC_POD, now)
+        gc(os.path.join(RRD_ROOT, node, "app"), GC_APP, now)
+    for e in errors:
+        print("error:", e, file=sys.stderr)
+    print(f"ok: nodes={len(nodes)} files={len(targets)} errors={len(errors)}")
     return 1 if errors else 0
 
 

@@ -590,6 +590,35 @@ if GEN_CRON not in _lines:
 else:
     print("[skip] cron gen-k8s-status ja ativo")
 
+# k8s-rrd-collect: historico em RRD que cada no PVE guarda sozinho (todos os
+# nos do k8s, via kubelet local + proxy do apiserver); timer systemd a cada
+# minuto. Processo novo a cada execucao -> fora do calculo de freshness.
+RRD_FILES = (
+    ("k8s-rrd-collect", "/usr/local/sbin/k8s-rrd-collect", 0o755),
+    ("k8s-rrd-collect.service", "/etc/systemd/system/k8s-rrd-collect.service", 0o644),
+    ("k8s-rrd-collect.timer", "/etc/systemd/system/k8s-rrd-collect.timer", 0o644),
+)
+_rrd_changed = False
+for _name, _dst, _mode in RRD_FILES:
+    _src = os.path.join(_HERE2, _name)
+    if not os.path.exists(_src):
+        print(f"[aviso] {_name} nao encontrado ao lado do patch_ui.py")
+        continue
+    with open(_src, encoding="utf-8") as f:
+        _data = f.read()
+    _cur = open(_dst, encoding="utf-8").read() if os.path.exists(_dst) else None
+    if _cur != _data:
+        with open(_dst, "w", encoding="utf-8") as f:
+            f.write(_data)
+        os.chmod(_dst, _mode)
+        _rrd_changed = True
+        print(f"[ok] {_name} instalado ({_dst})")
+    else:
+        print(f"[skip] {_name} ja atualizado")
+if _rrd_changed:
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+subprocess.run(["systemctl", "enable", "--now", "k8s-rrd-collect.timer"], check=False)
+
 # NodeK8sNet.pm e carregado pelo pvedaemon (via Nodes.pm) -> entra no
 # calculo de freshness logo abaixo.
 if os.path.exists(os.path.join(_HERE2, "nodek8snet.pm")):

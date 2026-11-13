@@ -120,17 +120,17 @@ test.describe('Node Kubernetes tab - aggregated usage charts', () => {
   });
 
   // v1.0.11: graficos NATIVOS do PVE (proxmoxRRDChart) na aba Kubernetes do no,
-  // alimentados por /nodes/{node}/k8sapp/noderrddata. Deploys anteriores nao
+  // alimentados por /nodes/{node}/k8sapp/node/rrddata. Deploys anteriores nao
   // tem o endpoint nem o painel: skip (caminho legacy, card de canvas acima).
-  test('GET k8sapp/noderrddata serves RRD rows for the node', async ({ page }) => {
+  test('GET k8sapp/node/rrddata serves RRD rows for the node', async ({ page }) => {
     await login(page);
     const h = await (await page.request.get(`${pveBase}/pve2/js/k8s/node-history.json`)).json().catch(() => null);
     test.skip(!h || !h.node, 'node-history.json ausente');
     const resp = await page.request.get(
-      `${pveBase}/api2/json/nodes/${encodeURIComponent(h.node)}/k8sapp/noderrddata?timeframe=hour&cf=AVERAGE`);
+      `${pveBase}/api2/json/nodes/${encodeURIComponent(h.node)}/k8sapp/node/rrddata?timeframe=hour&cf=AVERAGE`);
     test.skip(resp.status() === 501 || resp.status() === 404 || resp.status() === 400,
       'deploy sem endpoint noderrddata (pre-v1.0.11)');
-    expect(resp.status(), 'noderrddata GET status').toBe(200);
+    expect(resp.status(), 'node rrddata GET status').toBe(200);
     const rows = (await resp.json()).data;
     expect(Array.isArray(rows), 'rows array').toBe(true);
     expect(rows.length, 'at least one sample').toBeGreaterThan(0);
