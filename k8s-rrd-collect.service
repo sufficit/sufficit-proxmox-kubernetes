@@ -1,0 +1,11 @@
+[Unit]
+Description=Node-local Kubernetes history for the Proxmox UI (RRD)
+After=rrdcached.service k3s.service
+Wants=rrdcached.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/k8s-rrd-collect
+Nice=10
+CPUQuota=20%
+TimeoutStartSec=50

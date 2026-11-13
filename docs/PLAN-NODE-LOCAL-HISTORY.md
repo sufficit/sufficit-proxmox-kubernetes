@@ -1,6 +1,6 @@
 # Plan: node-local history in RRD, live state on demand
 
-Date: 2026-11-13. Status: proposed. Owner decision: each PVE node produces its own data; the UI must not
+Date: 2026-11-13. Status: phase 1 running (collector in parallel since 2026-11-13 18:40 BRT). Owner decision: each PVE node produces its own data; the UI must not
 depend on VictoriaMetrics or on any other node to draw its own graphs.
 
 ## Problem (measured 2026-11-13)
@@ -55,6 +55,19 @@ VictoriaMetrics runs only on eveo; if it is down, every node loses its graphs.
 0. **Done 2026-11-13:** compact JSON in `write_json` (repo and the 3 nodes).
 1. Collector `k8s-rrd-collect` (node-local, RRD) running **in parallel** with the current cron; compare series for
    24 h against `node-history.json`.
+   - **Installed 2026-11-13 on eveo, apoint, castrum** (manual: `/usr/local/sbin/k8s-rrd-collect`,
+     `k8s-rrd-collect.timer` at :30 of every minute). Cost per run: eveo 0.17 s CPU (62 pods), apoint/castrum
+     0.06 s (20-21 pods), against 4-11 s for `gen-status.py`. Disk: eveo 69 MB (125 files), apoint/castrum ~24 MB.
+   - Data comes from the local kubelet (`https://127.0.0.1:10250/stats/summary` and `/pods`, apiserver client cert
+     from `/var/lib/rancher/k3s/server/tls`), so it works with the apiserver down.
+   - Design change: CPU and network are **rates computed per pod** against the previous run (state in
+     `/run/k8s-rrd-collect.state.json`) and stored as GAUGE (`cores`, `netin`, `netout`). Summing cumulative counters
+     per app/node would give a negative step or a spike whenever a pod appears or disappears.
+   - Network (`netin`/`netout`) is new: today's graphs show 0. hostNetwork pods are skipped (they would report host
+     interfaces).
+   - App mapping without the apiserver: Deployment name = ReplicaSet name minus `-<pod-template-hash>`.
+   - Gate to phase 2: 24 h of samples without errors in `journalctl -u k8s-rrd-collect`, node series matching
+     `node-history.json` (CPU and memory).
 2. Switch `noderrddata`/`podrrddata`/`rrddata` to RRD; per-app fan-out in `app-browser.js`; Playwright specs
    `node-usage.spec.js` and `pods-in-tree.spec.js` updated.
 3. Live state on demand + 30 s cache; remove `history.json`, `pod-history.json`, `node-history.json` and the cron
