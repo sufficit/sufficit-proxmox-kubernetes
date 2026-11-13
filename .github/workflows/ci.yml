@@ -25,7 +25,7 @@ jobs:
 
       # Sintaxe Python: aplicador de patches e gerador de status.
       - name: Python (py_compile)
-        run: python3 -m py_compile patch_ui.py gen-status.py
+        run: python3 -m py_compile patch_ui.py gen-status.py && python3 -c "import ast,sys; ast.parse(open('k8s-rrd-collect').read())"
 
       # Sintaxe JavaScript: painel do browser e suite Playwright.
       - name: JavaScript (node --check)
@@ -62,7 +62,7 @@ jobs:
           for mod in \
             PVE::Cluster PVE::Exception PVE::INotify PVE::JSONSchema \
             PVE::RESTHandler PVE::RPCEnvironment PVE::SSHInfo PVE::Tools \
-            PVE::API2Tools PVE::AccessControl PVE::SafeSyslog \
+            PVE::API2Tools PVE::AccessControl PVE::SafeSyslog PVE::RRD \
             PVE::API2::Cluster::K8sNet JSON File::ReadBackwards; do
             path="$STUB/${mod//:://}.pm"
             mkdir -p "$(dirname "$path")"
