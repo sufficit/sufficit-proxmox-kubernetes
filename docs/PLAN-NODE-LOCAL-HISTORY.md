@@ -73,6 +73,17 @@ VictoriaMetrics runs only on eveo; if it is down, every node loses its graphs.
    - App mapping without the apiserver: Deployment name = ReplicaSet name minus `-<pod-template-hash>`.
    - Gate to phase 2: 24 h of samples without errors in `journalctl -u k8s-rrd-collect`, node series matching
      `node-history.json` (CPU and memory).
+   - **Gate check 2026-11-14 16:30 BRT (21.5 h of the multi-node collector):** ~1,300 runs per node, all
+     `errors=0`, on eveo, apoint and castrum; 135 MB / 244 files per node. Day view, RRD vs JSON on eveo:
+
+     | Series | CPU avg (cores) RRD / JSON | Memory avg (GiB) RRD / JSON | netin avg RRD |
+     |---|---|---|---|
+     | node eveo-cloud | 0.564 / 0.605 | 8.49 / 8.31 | 590 KB/s |
+     | kube-system:coredns (4 nodes) | 0.019 / 0.021 | 0.176 / 0.172 | 5.1 KB/s |
+     | quepasa-prod:quepasa-prod-router | 0.044 / 0.045 | 0.106 / 0.104 | 26.5 KB/s |
+
+     JSON peaks are higher (instant metrics-server reading vs RRD minute average). The same app read on apoint
+     returns the same numbers as on eveo (full replication works).
 2. Switch `noderrddata`/`podrrddata`/`rrddata` to RRD; per-app fan-out in `app-browser.js`; Playwright specs
    `node-usage.spec.js` and `pods-in-tree.spec.js` updated.
    - **Deployed 2026-11-13** with `manage.sh update --tarball` on eveo, apoint, castrum (one at a time), verify
