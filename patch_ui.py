@@ -570,7 +570,7 @@ if PUBLISH_CRON not in _lines or any("k8snet-apply-node --publish" in l and l !=
         text=True,
         check=True,
     )
-    print("[ok] cron k8snet snapshot instalado (1 min)")
+    print("[ok] cron k8snet snapshot instalado (5 min)")
 else:
     print("[skip] cron k8snet snapshot ja ativo")
 
