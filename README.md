@@ -42,7 +42,7 @@ O submenu agora é uma visão **multi-nó por padrão**:
 
 - **GET `/cluster/k8snet/network`** agrega o snapshot local ao estado publicado por cada nó no KV do pmxcfs. A grade mostra, por host, pod CIDR, service CIDR, interface Flannel, node IP, idade do snapshot e conflitos.
 - `cluster.nodes_total`, `cluster.nodes_reporting` e `cluster.consistent` indicam cobertura e consistência. Divergência de `cluster-cidr`/`service-cidr` entre servidores k3s aparece como conflito, pois essas faixas são globais do cluster Kubernetes.
-- O snapshot é publicado a cada minuto por `/usr/local/sbin/k8snet-apply-node --publish`. Dados com mais de 10 minutos ficam `stale` e não entram na comparação de consistência.
+- O snapshot é publicado a cada 5 minutos (e logo após apply/rollback) por `/usr/local/sbin/k8snet-apply-node --publish`. Dados com mais de 10 minutos ficam `stale` e não entram na comparação de consistência.
 - **PUT `/cluster/k8snet/network`** faz pre-flight em todos os nós alvo e, por padrão, aplica a configuração em todos os nós PVE. O campo opcional `nodes` (lista separada por vírgulas) restringe o alvo. `cluster-cidr`/`service-cidr` devem ser iguais nos servidores; `flannel-iface`/`node-ip` continuam específicos de cada host, então a UI só preenche os valores comuns e permite restringir o fan-out quando necessário.
 - A rota per-node `/nodes/{node}/k8snet/network` usa o dispatcher `proxyto => node` e mantém a operação no host selecionado. A SDN permanece somente leitura nesta tela.
 

@@ -50,7 +50,17 @@ for my $arg (@ARGV) {
     }
 }
 
-# Modo de somente leitura chamado pelo cron root de cada no (1 min): publica o
+# The cron publishes every 5 min (snapshots are stale only after 600 s); after a
+# change (apply/rollback) publish right away so the other nodes see it now.
+sub publish_now {
+    eval {
+        PVE::API2::Cluster::K8sNet::publish_node_snapshot(
+            PVE::API2::Cluster::K8sNet::node_snapshot());
+    };
+    warn "publish failed: $@" if $@;
+}
+
+# Modo de somente leitura chamado pelo cron root de cada no (5 min): publica o
 # snapshot local no status KV do pmxcfs para o GET de cluster agregar todos os
 # nos. Nao altera unit nem servico.
 if ($publish) {
@@ -62,6 +72,7 @@ if ($publish) {
 if ($rollback) {
     PVE::API2::Cluster::K8sNet::restore_unit_backup(
         '/etc/systemd/system/k3s.service.failed-k8snet-fanout-' . time());
+    publish_now();
     print "rollback done\n";
     exit 0;
 }
@@ -75,5 +86,6 @@ if ($check) {
 }
 
 PVE::API2::Cluster::K8sNet::apply_node_net_flags(\%flags, $restart);
+publish_now();
 print "done\n";
 exit 0;
