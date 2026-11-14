@@ -86,7 +86,7 @@ a Folder View continua agrupando por tipo em “Kubernetes Applications”.
 | Arquivo | Papel |
 |---|---|
 | `patch_ui.py` | patches idempotentes: Services.pm (k3s), **Cluster.pm (tipo `k8sapp` em `/cluster/resources`)**, pvemanagerlib.js (aba, `typeDefaults`, `getTypeOrder`, `treeTypeToClass`, campo `k8sapp`, `startOnlyServices`) e index.html.tpl (script `app-browser.js`). Backups `*.bak-k8spoc`; reinicia `pvedaemon`/`pveproxy` só se ficaram velhos frente aos `.pm` |
-| `gen-status.py` | gera `status.json` **e `apps.json`** (apps, réplicas, requests/limits agregados, pods) e os históricos `history.json`/`pod-history.json`/`node-history.json` a partir do k3s local; sem segredos; no host: `/usr/local/sbin/gen-k8s-status.py`, cron root a cada minuto |
+| `gen-status.py` | gera `status.json` **e `apps.json`** (apps, réplicas, requests/limits agregados, pods) a partir do k3s local (históricos: ver `k8s-rrd-collect`); sem segredos; no host: `/usr/local/sbin/gen-k8s-status.py`, cron root a cada minuto |
 | `k8s-rrd-collect` (+ `.service`/`.timer`) | **fase 1 do `docs/PLAN-NODE-LOCAL-HISTORY.md`, em paralelo com o cron:** histórico local do nó em RRD (`/var/lib/rrdcached/db/pve-k8s-1.0/{node,app,pod}/…`) lido só do kubelet local, sem apiserver; legível com `PVE::RRD::create_rrd_data`. No host: `/usr/local/sbin/k8s-rrd-collect`, timer systemd a cada minuto (instalação manual até a fase 3) |
 | `app-browser.js` | widget `pveK8sAppBrowser` + `PVE.k8sapp.CmdMenu` — painel e menu de contexto da aplicação; janelas de escala, logs, describe e exclusão de pod |
 | `index.html` | painel da aba do nó, servido em `/pve2/js/k8s/index.html` |
@@ -240,10 +240,10 @@ Cada pod do snapshot sobe em `/cluster/resources` como recurso `k8spod` com
   imagens). Os gráficos usam os mesmos
   componentes nativos da aplicação (`proxmoxRRDChart` + seletor de período) e
   leem `GET /nodes/{node}/k8sapp/{appid}/pods/{pod}/rrddata`, alimentado por
-  `pod-history.json` (1 amostra/minuto do metrics-server, ~25 h por pod;
-  gerado pelo mesmo `gen-k8s-status.py`). CPU é a fração do limite do pod (ou
+  RRD do `k8s-rrd-collect` (1 amostra/minuto do kubelet, 1 dia em resolução de
+  1 min e 1 mês em 30 min por pod; desde 2026-11-14). CPU é a fração do limite do pod (ou
   da capacidade do nó, se o pod não declara limite); memória mostra o limite
-  efetivo como "Total". Pods que somem do cluster saem do arquivo — pod
+  efetivo como "Total". Arquivos de pods que somem são removidos após 2 dias — pod
   recriado tem nome novo e começa série nova. O endpoint rejeita pods que não
   pertencem à aplicação do caminho.
 - Botão direito no pod: Console / Pod logs / Describe pod / View YAML /
@@ -252,11 +252,11 @@ Cada pod do snapshot sobe em `/cluster/resources` como recurso `k8spod` com
 - Na aba **Kubernetes do nó PVE** (Server View → nó → Kubernetes), o card
   **Consumo dos pods — agregado neste nó** desenha gráficos de CPU e memória
   de TODOS os pods com `spec.nodeName == este host` (qualquer namespace,
-  somados a cada amostra do metrics-server), lendo `node-history.json`
-  (1 amostra/minuto, ~25 h; mesmo gerador `gen-k8s-status.py`). O cabeçalho
+  somados a cada amostra do kubelet), lendo o RRD do nó
+  (`k8sapp/node/rrddata`, até 1 ano). O cabeçalho
   mostra o consumo atual contra a capacidade do nó e o número de pods
-  considerados; seletor de janela Hora/12h/Dia/Tudo. Em deploys antigos (sem
-  `node-history.json` ou com menos de 2 amostras) o card permanece oculto.
+  considerados. Os gráficos nativos do PVE substituem o card antigo do
+  `index.html` (que lia `node-history.json`, não mais gerado: fica oculto).
 
 Salvo a rota de gráficos acima, tudo reusa os endpoints `/nodes/{node}/k8sapp/...`, com o
 nó real viajando no campo `k8snode` do registro do pod.
@@ -287,9 +287,12 @@ Notas:
 - O patcher aceita âncoras variantes por versão (já cobre 9.1.x e 9.2.x):
   se uma âncora não casa, ele tenta a variante seguinte e aborta sem
   alterar caso nenhuma case exatamente 1x.
-- O cron do `gen-k8s-status.py` agora é instalado pelo próprio patcher
-  (instalações anteriores o tinham criado à mão — é o que publica
-  apps.json/status.json/history.json/pod-history.json a cada minuto).
+- O cron do `gen-k8s-status.py` é instalado pelo próprio patcher com
+  `--if-demand` (desde 2026-11-14): só regenera `apps.json`/`status.json`
+  enquanto a UI está em uso (pedido de UI no `access.log` do pveproxy nos
+  últimos 5 min) ou quando o snapshot passa de 30 min. Os históricos ficam no
+  RRD do `k8s-rrd-collect`; `history.json`/`pod-history.json`/`node-history.json`
+  são removidos.
 - `manage.sh verify` trata `docker` como opcional (hosts sem Docker).
 - Suite E2E: `PVE_URL`/`PVE_USER`/`PVE_PASSWORD`/`PVE_HOST` apontam para o
   host alvo; os testes não dependem mais de nomes fixos de pods/apps nem

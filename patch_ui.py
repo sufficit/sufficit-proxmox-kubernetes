@@ -572,21 +572,15 @@ if PUBLISH_CRON not in _lines:
 else:
     print("[skip] cron k8snet snapshot ja ativo")
 
-# gen-k8s-status: publica apps.json/status.json/history.json a cada minuto
-# (instalacoes antigas nao tinham essa entrada — era criada a mao).
-GEN_CRON = "* * * * * /usr/local/sbin/gen-k8s-status.py >/dev/null 2>&1"
-if GEN_CRON not in _lines:
-    _lines.append(GEN_CRON)
-    subprocess.run(
-        [
-            "crontab",
-            "-",
-        ],
-        input=chr(10).join(_lines) + chr(10),
-        text=True,
-        check=True,
-    )
-    print("[ok] cron gen-k8s-status instalado (1 min)")
+# gen-k8s-status: snapshot apps.json/status.json for the UI, regenerated every
+# minute ONLY while the UI is in use (--if-demand; history lives in RRD).
+# Replaces any previous gen-k8s-status line (the old one ran unconditionally).
+GEN_CRON = "* * * * * /usr/local/sbin/gen-k8s-status.py --if-demand >/dev/null 2>&1"
+_other = [l for l in _lines if "gen-k8s-status" not in l]
+if _other + [GEN_CRON] != _lines:
+    _lines = _other + [GEN_CRON]
+    subprocess.run(["crontab", "-"], input=chr(10).join(_lines) + chr(10), text=True, check=True)
+    print("[ok] cron gen-k8s-status --if-demand instalado (1 min)")
 else:
     print("[skip] cron gen-k8s-status ja ativo")
 
