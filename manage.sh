@@ -50,7 +50,7 @@ verify() {
   grep -q 'subclass => "PVE::API2::NodeK8sNet"' "$NODES_PM" && ok "Nodes.pm registra /nodes/{node}/k8snet" || fail "Nodes.pm sem rota k8snet"
   grep -q "PVE::API2::Cluster::K8sNet" "$CLUSTER_PM" && ok "Cluster.pm registra /cluster/k8snet" || fail "Cluster.pm sem rota k8snet"
   [ -x "$K8SNET_APPLY" ] && ok "aplicador instalado ($K8SNET_APPLY)" || fail "aplicador ausente ($K8SNET_APPLY)"
-  crontab -l 2>/dev/null | grep -q "k8snet-apply-node --publish" && ok "cron publisher do snapshot ativo (1 min)" || fail "cron publisher ausente"
+  crontab -l 2>/dev/null | grep -q "k8snet-apply-node --publish" && ok "cron publisher do snapshot ativo (5 min)" || fail "cron publisher ausente"
   [ -x /usr/local/sbin/k8s-ui-guard ] && ok "guard instalado (/usr/local/sbin/k8s-ui-guard)" || fail "guard ausente (/usr/local/sbin/k8s-ui-guard)"
   [ -f /etc/apt/apt.conf.d/99k8s-ui-guard ] && ok "guard: hook apt (DPkg::Post-Invoke)" || fail "guard: hook apt ausente"
   [ -f "$K8S_STATE_DIR/guard-src-dir" ] && ok "guard: origem do patch_ui.py registrada" || fail "guard: origem do patch_ui.py nao registrada (rode patch_ui.py)"

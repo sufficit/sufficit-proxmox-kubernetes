@@ -557,18 +557,20 @@ else:
 # Publica o snapshot local no KV do pmxcfs a cada minuto. A entrada e
 # compartilhada entre os nos do cluster e lida pelo GET cluster-level; se o
 # host e standalone, continua sendo apenas uma leitura local sem efeito extra.
-PUBLISH_CRON = "* * * * * /usr/local/sbin/k8snet-apply-node --publish >/dev/null 2>&1"
+# Every 5 min: a snapshot is stale only after 600 s, and apply/rollback publish
+# immediately. Replaces the previous every-minute line (0.8 s CPU per run).
+PUBLISH_CRON = "*/5 * * * * /usr/local/sbin/k8snet-apply-node --publish >/dev/null 2>&1"
 _cron = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
 _lines = [l for l in _cron.splitlines() if l.strip()]
-if PUBLISH_CRON not in _lines:
-    _lines.append(PUBLISH_CRON)
+if PUBLISH_CRON not in _lines or any("k8snet-apply-node --publish" in l and l != PUBLISH_CRON for l in _lines):
+    _lines = [l for l in _lines if "k8snet-apply-node --publish" not in l] + [PUBLISH_CRON]
     subprocess.run(
         ["crontab", "-"],
         input=chr(10).join(_lines) + chr(10),
         text=True,
         check=True,
     )
-    print("[ok] cron k8snet snapshot instalado (1 min)")
+    print("[ok] cron k8snet snapshot instalado (5 min)")
 else:
     print("[skip] cron k8snet snapshot ja ativo")
 
