@@ -1,7 +1,6 @@
-# Plan: node-local history in RRD, live state on demand
+# Activity: node-local history in RRD, live state on demand
 
-Date: 2026-11-13. Status: phases 1-2 deployed on eveo/apoint/castrum (2026-11-13 19:00 BRT); graphs switch to RRD automatically on
-2026-11-14 ~19:00 BRT (`.since` + 24 h); phases 3-4 pending. Owner decision: each PVE node produces its own data; the UI must not
+Date: 2026-11-13 to 2026-11-14. Status: done (all phases deployed on eveo, apoint, castrum). Owner decision: each PVE node produces its own data; the UI must not
 depend on VictoriaMetrics or on any other node to draw its own graphs.
 
 ## Problem (measured 2026-11-13)
@@ -44,11 +43,15 @@ VictoriaMetrics runs only on eveo; if it is down, every node loses its graphs.
 
 ### Live state: on demand with a short cache
 
-- `apps.json`/`status.json` stop being produced by cron. The `k8sapp` endpoints (and `Cluster.pm` for the resource
-  tree) call the apiserver when asked and keep the result in a per-node cache file for 30 s.
-- The resource tree polls `/cluster/resources` every few seconds while the UI is open: the 30 s cache bounds the
-  apiserver load to at most 2 calls per minute per node, and zero when no one has the UI open.
-- If the apiserver is down the panel shows the cached snapshot with its age.
+- **Revised 2026-11-14 (implemented):** keep `gen-status.py` producing `apps.json`/`status.json`, but the cron runs it
+  with `--if-demand`: it regenerates only when the pveproxy access log shows an authenticated UI request in the last
+  5 min (`/cluster/resources` without a type filter, which is what the resource tree polls, or the `k8sapp` API), or
+  when the snapshot is older than 30 min. Zabbix polls `/cluster/resources?type=vm` every minute and does not count;
+  unauthenticated static fetches (scanners) do not count either.
+- Why not a per-request cache inside `Cluster.pm`/`K8sApp.pm`: same effect (zero work when nobody looks, one run per
+  minute while someone does) without touching the patched PVE modules or adding apiserver calls to the request path.
+- Freshness: the first view after an idle period shows a snapshot up to 30 min old, refreshed within 1 min.
+  Actions still regenerate immediately (`trigger_refresh`).
 
 ### Collector cadence
 
@@ -101,7 +104,26 @@ VictoriaMetrics runs only on eveo; if it is down, every node loses its graphs.
    - Pending: confirm the automatic cutover on 2026-11-14 ~19:00 BRT on the 3 nodes.
 3. Live state on demand + 30 s cache; remove `history.json`, `pod-history.json`, `node-history.json` and the cron
    from `patch_ui.py`/`manage.sh` (`manage.sh` checks updated).
+   - **Cutover advanced 2026-11-14 ~16:31 BRT** at the owner's request: `.since` moved back 24 h on the 3 nodes
+     (originals kept as `.since.orig-20261114`); `auto` returned RRD on all 3 (netin non-zero).
+   - **Deployed 2026-11-14 16:32-16:33 BRT** (`manage.sh update --tarball`, eveo -> apoint -> castrum, verify `TUDO OK`):
+     JSON history no longer produced and removed on the next run; cron line replaced by `--if-demand` (see the
+     revised design above).
 4. Measure again on the 3 nodes (CPU per minute, apiserver request rate) and record in an activity.
+   - **Measured 2026-11-14 16:40 BRT** (UI idle, 7 min after the deploy):
+
+     | Node | gen-status before (per minute) | after, idle (per minute) | k8s-rrd-collect (per minute) |
+     |---|---|---|---|
+     | eveo-cloud | 10.4 s wall / 13.8 s CPU (7.6 / 11 after compact JSON) | 0.08 s | ~0.25 s |
+     | apoint-cloud | ~4.5 s CPU | 0.04 s | ~0.25 s |
+     | castrum-cloud | ~4.1 s CPU | 0.03 s | ~0.25 s |
+
+     JSON history files gone on the 3 nodes. With the UI open, gen-status still runs every minute on the node the
+     browser talks to (same cost as before, only while in use).
+   - `k3s.service` on eveo stayed at ~78% of a core over 60 s (75% on 2026-11-13): the apiserver load from
+     gen-status was not what drives k3s CPU (embedded etcd and controllers; 17 idle Fleet executor namespaces are
+     the next suspect, outside this plan). `k8snet-apply-node --publish` (cron, every minute) costs 0.8 s CPU per
+     run: next candidate for the same on-demand treatment, outside this plan.
 
 ## Findings to resolve along the way
 

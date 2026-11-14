@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 """
-POC: gera os JSONs lidos pela UI do Proxmox. Roda por cron a cada minuto.
-
-- status.json  : painel da aba "Kubernetes" do nó (nó, pods kube-system, namespaces)
-- apps.json    : aplicações Kubernetes (Deployments/StatefulSets/DaemonSets/Jobs/pods
-                 soltos) com réplicas, uso e reservas de CPU/memória, containers,
-                 serviços, DNS e lista de pods. Consumido por:
-                   * Cluster.pm  -> /cluster/resources (tipo 'k8sapp', árvore)
-                   * K8sApp.pm   -> /nodes/{node}/k8sapp/{appid}/... (painéis)
-- history.json : série temporal por aplicação (CPU/memória/pods/restarts), usada
-                 pelo endpoint rrddata para desenhar os mesmos gráficos do guest.
-- pod-history.json : série temporal por POD (CPU/memória do metrics-server), usada
-                 pelo endpoint podrrddata (gráficos do painel do pod na árvore).
-- node-history.json : série temporal agregada do NÓ (soma de CPU/memória de todos
-                 os pods com spec.nodeName == este host, qualquer namespace),
-                 lida pela aba Kubernetes do nó (index.html) para os gráficos.
-
-Somente leitura de dados locais; não expõe segredos.
+Purpose: snapshot of the Kubernetes cluster for the Proxmox UI (installed as
+         /usr/local/sbin/gen-k8s-status.py):
+         - status.json : node "Kubernetes" tab (node, kube-system pods, namespaces)
+         - apps.json   : applications (Deployments/StatefulSets/DaemonSets/Jobs/
+                         bare pods) with replicas, usage, requests/limits,
+                         containers, services, DNS and pods. Read by Cluster.pm
+                         (/cluster/resources, 'k8sapp' tree type) and K8sApp.pm
+                         (/nodes/{node}/k8sapp/{appid}/... panels).
+         History (graphs) is NOT produced here anymore: k8s-rrd-collect keeps it
+         in RRD on every PVE node. The legacy history.json, pod-history.json and
+         node-history.json are removed on the next run.
+Usage:   gen-k8s-status.py              # regenerate now (actions, verify)
+         gen-k8s-status.py --if-demand  # cron: only while the UI is in use
+                                        # (pveproxy access log), or when the
+                                        # snapshot is older than 30 min
+Read-only, local data; exposes no secrets.
+Last modified: 2026-11-14
 """
 import datetime
 import json
 import os
+import re
 import socket
 import subprocess
 import tempfile
@@ -34,12 +35,26 @@ OUT_NODE_HISTORY = os.path.join(OUT_DIR, "node-history.json")
 K3S = "/usr/local/bin/k3s"
 NODENAME = socket.gethostname().split(".")[0]
 
-# 1 amostra/minuto: 1500 amostras ~ 25h (cobre os recortes Hour e Day da UI)
-HISTORY_MAX = 1500
-# Mesma janela para pods. O arquivo e compacto ([ts, milicores, bytes] por
-# amostra, sem indentacao) para caber ~centenas de pods bem abaixo do teto de
-# 32 MiB que o k8sapp.pm aceita ler.
-POD_HISTORY_MAX = HISTORY_MAX
+# History (graphs) moved to k8s-rrd-collect (RRD, every PVE node); these JSON
+# files are no longer produced and are removed on the next run.
+LEGACY_HISTORY = (OUT_HISTORY, OUT_POD_HISTORY, OUT_NODE_HISTORY)
+
+# --if-demand: the snapshot (apps.json/status.json) only feeds the UI, so it is
+# regenerated only while someone uses it. Demand = a UI request in the
+# pveproxy access log within DEMAND_WINDOW: an AUTHENTICATED request (user
+# field set) to /cluster/resources without a type filter (what the resource
+# tree polls; Zabbix uses ?type=vm and does not count) or to the k8sapp API.
+# Static files do not count: they are public and scanners fetch them. Even
+# idle, the snapshot never gets older than MAX_IDLE_AGE.
+ACCESS_LOG = "/var/log/pveproxy/access.log"
+DEMAND_WINDOW = 300
+MAX_IDLE_AGE = 1800
+DEMAND_RE = re.compile(
+    r'"(?:GET|POST|PUT|DELETE) (?:/api2/\w+/cluster/resources(?:\?type=k8sapp)? '
+    r'|/api2/\w+/nodes/[^/ ]+/k8sapp)'
+)
+USER_RE = re.compile(r"^\S+ \S+ (\S+) \[")
+TS_RE = re.compile(r"\[(\d{2})/(\d{2})/(\d{4}):(\d{2}):(\d{2}):(\d{2}) ([+-]\d{4})\]")
 
 
 def kc_json(*args, timeout=20):
@@ -739,119 +754,58 @@ def build_apps():
         OUT_APPS,
         {"generated": datetime.datetime.now().isoformat(timespec="seconds"), "apps": out},
     )
-    build_history(out, now)
-    build_pod_history(out, now)
-    build_node_history(out, now)
     return len(out)
 
 
-# --------------------------------------------------------------- history.json
-def build_history(apps, now):
-    """Série temporal por aplicação, consumida pelo endpoint rrddata."""
-    hist = read_json(OUT_HISTORY, {})
-    series = hist.get("series") or {}
-    alive = set()
-    for a in apps:
-        key = a["appid"]
-        alive.add(key)
-        samples = series.get(key) or []
-        samples.append(
-            [
-                now,
-                a["cpu"],
-                a["cpus"],
-                a["mem"],
-                a["maxmem"],
-                a["podsReady"],
-                a["podsTotal"],
-                a["restarts"],
-                a["disk"],
-                a["maxdisk"],
-            ]
-        )
-        series[key] = samples[-HISTORY_MAX:]
-    for key in list(series):
-        if key not in alive:
-            del series[key]
-    write_json(OUT_HISTORY, {"generated": now, "series": series})
+def ui_demand(now):
+    """Last UI request time seen in the tail of the pveproxy access log."""
+    try:
+        with open(ACCESS_LOG, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 512 * 1024))
+            tail = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(tail):
+        if not DEMAND_RE.search(line):
+            continue
+        u = USER_RE.match(line)
+        if not u or u.group(1) == "-":
+            continue
+        m = TS_RE.search(line)
+        if not m:
+            continue
+        d, mo, y, hh, mi, ss, tz = m.groups()
+        ts = datetime.datetime(int(y), int(mo), int(d), int(hh), int(mi), int(ss),
+                               tzinfo=datetime.datetime.strptime(tz, "%z").tzinfo)
+        return ts.timestamp()
+    return None
 
 
-# ----------------------------------------------------------- pod-history.json
-def build_pod_history(apps, now):
-    """Serie temporal por POD, consumida pelo endpoint podrrddata.
-
-    Chave = "<namespace>:<pod>" (nomes de pod sao unicos por namespace).
-    Amostra = [ts, milicores, bytes_mem, bytes_disco]. Os maximos (limite efetivo) viajam so na
-    entrada "max" do pod, porque mudam raramente e o grafico usa o valor atual.
-    Pods que sumiram saem do arquivo (pod recriado = nome novo = serie nova).
-    """
-    hist = read_json(OUT_POD_HISTORY, {})
-    series = hist.get("series") or {}
-    maxes = {}
-    alive = set()
-    for a in apps:
-        for p in a["pods"]:
-            key = f"{a['namespace']}:{p['name']}"
-            alive.add(key)
-            samples = series.get(key) or []
-            samples.append(
-                [now, p.get("cpuMilli", 0), p.get("memBytes", 0), p.get("diskBytes", 0)]
-            )
-            series[key] = samples[-POD_HISTORY_MAX:]
-            maxes[key] = [p.get("cpuMax", 0), p.get("memMax", 0), p.get("diskMax", 0)]
-    for key in list(series):
-        if key not in alive:
-            del series[key]
-    write_json(
-        OUT_POD_HISTORY,
-        {"generated": now, "max": maxes, "series": series},
-        compact=True,
-    )
-
-
-def build_node_history(apps, now):
-    """Série temporal agregada do NÓ (aba Kubernetes do nó no PVE).
-
-    CPU/memória: soma de TODOS os pods com spec.nodeName == este host
-    (metrics-server), contra a capacidade DESTE nó. Disco: uso real do rootfs
-    do host (statfs de /, o mesmo número do "Disk usage" do PVE) e, à parte, a
-    soma do ephemeral-storage dos pods. Amostra única
-    [ts, milicores, bytes_mem, bytes_disco_host, bytes_disco_pods]; os máximos
-    (capacidade do nó) viajam em "max" = [milicores, bytes_mem, bytes_disco].
-    1 amostra/minuto, janela HISTORY_MAX.
-    """
-    cpu_m = 0.0
-    mem_b = 0
-    pods_disk = 0
-    n_pods = 0
-    for a in apps:
-        for p in a["pods"]:
-            if (p.get("node") or NODENAME) != NODENAME:
-                continue
-            n_pods += 1
-            cpu_m += p.get("cpuMilli", 0)
-            mem_b += p.get("memBytes", 0)
-            pods_disk += p.get("diskBytes", 0)
-    cpus, maxmem = node_capacity()
-    used, total = host_disk()
-    hist = read_json(OUT_NODE_HISTORY, {})
-    # amostras antigas (3 ou 4 campos) completadas com zeros: formato uniforme
-    samples = [s + [0] * (5 - len(s)) if len(s) < 5 else s for s in (hist.get("series") or [])]
-    samples.append([now, int(round(cpu_m)), int(mem_b), int(used), int(pods_disk)])
-    write_json(
-        OUT_NODE_HISTORY,
-        {
-            "generated": now,
-            "max": [cpus * 1000.0, maxmem, int(total)],
-            "node": NODENAME,
-            "pods": n_pods,
-            "series": samples[-HISTORY_MAX:],
-        },
-        compact=True,
-    )
+def cleanup_legacy_history():
+    for path in LEGACY_HISTORY:
+        try:
+            os.unlink(path)
+            print(f"removed legacy {path}")
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == "__main__":
+    import sys
+    import time
+
+    if "--if-demand" in sys.argv:
+        now = time.time()
+        last = ui_demand(now)
+        try:
+            age = now - os.path.getmtime(OUT_APPS)
+        except OSError:
+            age = None
+        if (last is None or now - last > DEMAND_WINDOW) and age is not None and age < MAX_IDLE_AGE:
+            print(f"idle: no UI request in {DEMAND_WINDOW}s, snapshot age {int(age)}s")
+            sys.exit(0)
+    cleanup_legacy_history()
     build_status()
     n = build_apps()
-    print(f"ok: {OUT_STATUS} / {OUT_APPS} / {OUT_HISTORY} / {OUT_POD_HISTORY} ({n} apps)")
+    print(f"ok: {OUT_STATUS} / {OUT_APPS} ({n} apps)")

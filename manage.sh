@@ -83,17 +83,15 @@ verify() {
   echo "== Arquivos =="
   [ -s "$K8S_DIR/index.html" ] && ok "index.html presente" || fail "index.html ausente"
   [ -s "$K8S_DIR/app-browser.js" ] && ok "app-browser.js presente" || fail "app-browser.js ausente"
+  # The snapshot is regenerated only while the UI is in use (cron --if-demand):
+  # verify regenerates it once when older than 2 min instead of reporting stale.
+  if [ -x "$GEN" ] && { [ ! -s "$K8S_DIR/apps.json" ] || [ -n "$(find "$K8S_DIR/apps.json" -mmin +2 2>/dev/null)" ]; }; then
+    "$GEN" >/dev/null 2>&1 || true
+  fi
   [ -s "$K8S_DIR/apps.json" ] && ok "apps.json presente" || fail "apps.json ausente"
   [ -s "$K8S_DIR/status.json" ] && ok "status.json presente" || fail "status.json ausente"
-  [ -s "$K8S_DIR/history.json" ] && ok "history.json presente" || fail "history.json ausente"
-  # pod-history.json nasce do primeiro tick do cron apos a atualizacao do
-  # gerador: se o verify rodar antes disso, gera uma vez (idempotente, e o
-  # mesmo que o cron faz a cada minuto) em vez de acusar falso negativo.
-  if [ ! -s "$K8S_DIR/pod-history.json" ] && [ -x "$GEN" ]; then "$GEN" >/dev/null 2>&1 || true; fi
-  [ -s "$K8S_DIR/pod-history.json" ] && ok "pod-history.json presente" || fail "pod-history.json ausente (graficos por pod)"
-  # idem node-history.json (graficos agregados da aba Kubernetes do no)
-  if [ ! -s "$K8S_DIR/node-history.json" ] && [ -x "$GEN" ]; then "$GEN" >/dev/null 2>&1 || true; fi
-  [ -s "$K8S_DIR/node-history.json" ] && ok "node-history.json presente" || fail "node-history.json ausente (graficos do no)"
+  # History lives in RRD (k8s-rrd-collect); the JSON history files are gone.
+  [ -s "/var/lib/rrdcached/db/pve-k8s-1.0/$SHORT/node" ] && ok "historico RRD do no presente" || fail "historico RRD do no ausente (k8s-rrd-collect)"
   [ -f "$K8S_STATE_DIR/desired.json" ] && ok "desired.json persistente presente" || ok "desired.json ainda vazio (criado ao primeiro Stop/Scale)"
   [ -f "$K8S_STATE_DIR/notes.json" ] && ok "notes.json persistente presente" || ok "notes.json ainda vazio (criado no primeiro Notes save)"
   [ ! -e "$K8S_DIR/notes.json" ] && ok "diretorio estatico sem notes.json" || fail "notes.json no diretorio estatico (mover para $K8S_STATE_DIR)"
@@ -102,7 +100,7 @@ verify() {
   grep -q "{appid}/pods/{pod}/rrddata" "$K8SAPP_PM" && ok "graficos por pod (pods/{pod}/rrddata) presentes em K8sApp.pm" || fail "K8sApp.pm sem pods/{pod}/rrddata"
   grep -q "pveK8sConsole\|loadXterm" "$K8S_DIR/app-browser.js" && ok "app-browser.js com widget de console (xterm.js)" || fail "app-browser.js sem console"
   [ -x "$GEN" ] && ok "gerador instalado ($GEN)" || fail "gerador ausente"
-  crontab -l 2>/dev/null | grep -q gen-k8s-status && ok "cron ativo (1 min)" || fail "cron ausente"
+  crontab -l 2>/dev/null | grep -q "gen-k8s-status.py --if-demand" && ok "cron sob demanda ativo (1 min, so com a UI em uso)" || fail "cron gen-k8s-status --if-demand ausente"
   systemctl is-active --quiet k8s-rrd-collect.timer && ok "k8s-rrd-collect.timer ativo (historico RRD)" || fail "k8s-rrd-collect.timer inativo"
 
   echo "== Serviços =="
@@ -130,7 +128,7 @@ verify() {
   done
 
   echo "== HTTP via pveproxy =="
-  for p in /pve2/js/k8s/index.html /pve2/js/k8s/app-browser.js /pve2/js/k8s/status.json /pve2/js/k8s/apps.json /pve2/js/k8s/node-history.json; do
+  for p in /pve2/js/k8s/index.html /pve2/js/k8s/app-browser.js /pve2/js/k8s/status.json /pve2/js/k8s/apps.json; do
     code=$(curl -sk --resolve "$FQDN:8006:127.0.0.1" -o /dev/null -w "%{http_code}" "https://$FQDN:8006$p")
     [ "$code" = 200 ] && ok "$p -> 200" || fail "$p -> $code (novo dir criado? systemctl restart pveproxy)"
   done
